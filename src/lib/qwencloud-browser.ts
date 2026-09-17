@@ -1,10 +1,18 @@
-import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { BrowserStoreReadSummary } from "./browser-cookie-types.js";
+import {
+  type BrowserCookieStore,
+  type BrowserReaders,
+  type BrowserSessionImportResult,
+  type BrowserStoreReadResult,
+  browserStoresSignature,
+  fingerprintBrowserCookieStores,
+  importBrowserSession,
+  summarizeRead,
+} from "./browser-cookie-reader.js";
 import type { SystemKeyStore } from "./browser-keystore.js";
 import { resolveSystemKeyStore } from "./browser-secret-service.js";
-import { hasNonEmptyCompanionWal, type OpenBrowserStoreOptions } from "./browser-store-open.js";
+import type { OpenBrowserStoreOptions } from "./browser-store-open.js";
 import {
   type ChromiumCookieStore,
   listChromiumCookieStores,
@@ -18,68 +26,27 @@ import {
   readFirefoxCookieDatabase,
 } from "./qwencloud-firefox.js";
 
+/**
+ * QwenCloud browser session discovery.
+ *
+ * The sweep, ordering, write-ahead-log retry, and reporting are generic and live
+ * in `browser-cookie-reader.ts`. This module owns what is specific to the
+ * console: which hosts a ticket must be valid for, the environment overrides, and
+ * the readers that filter cookies down to QwenCloud domains.
+ */
+
 export const QWEN_CLOUD_BROWSER_ENV = "QWEN_CLOUD_BROWSER";
 export const QWEN_CLOUD_BROWSER_PROFILE_ENV = "QWEN_CLOUD_BROWSER_PROFILE";
 
-export type BrowserKind = "firefox" | "chromium";
+export type {
+  BrowserCookieStore,
+  BrowserKind,
+  BrowserSessionImportResult,
+  BrowserStoreFingerprint,
+  BrowserStoreInspection,
+} from "./browser-cookie-reader.js";
 
-export interface BrowserCookieStore {
-  kind: BrowserKind;
-  /** Lowercase browser identifier, e.g. `firefox`, `google-chrome`, `brave-browser`. */
-  browser: string;
-  profile: string;
-  dbPath: string;
-  /** Chromium browser root; identifies the Safe Storage keyring entry. */
-  rootPath?: string;
-  /** Chromium descriptor id, e.g. `chrome`, `edge`. */
-  browserId?: string;
-  /** libsecret `application` candidates for keyring-protected values. */
-  keyringApplications?: readonly string[];
-  /** Preferred by the browser's own install or profile metadata. */
-  preferred?: boolean;
-}
-
-/** Value-free outcome of reading one store, safe to surface in diagnostics. */
-export interface BrowserStoreInspection {
-  browser: string;
-  profile: string;
-  outcome: "session" | "no_ticket" | "no_rows" | "keyring" | "unreadable";
-  /** Protection and keyring counts, never cookie names or values. */
-  detail?: string;
-}
-
-export type BrowserSessionImportResult =
-  | {
-      state: "imported";
-      store: BrowserCookieStore;
-      cookies: QwenCloudCookie[];
-      inspections: BrowserStoreInspection[];
-    }
-  | { state: "no_stores" }
-  | { state: "disabled" }
-  | {
-      state: "no_session";
-      stores: BrowserCookieStore[];
-      keyringSeen: boolean;
-      inspections: BrowserStoreInspection[];
-    }
-  | { state: "unreadable"; stores: BrowserCookieStore[]; inspections: BrowserStoreInspection[] };
-
-export interface BrowserStoreFingerprint {
-  path: string;
-  mtimeMs: number;
-  size: number;
-}
-
-/**
- * Companion files whose contents reflect newly written cookies.
- *
- * A write-ahead log grows on every cookie write and is truncated by a
- * checkpoint, and a rollback journal appears while a writer is active. Watching
- * them makes a fresh browser login visible without waiting for the main database
- * file to change.
- */
-const FINGERPRINT_COMPANION_SUFFIXES = ["-wal", "-journal"] as const;
+export { browserStoresSignature, fingerprintBrowserCookieStores, summarizeRead };
 
 export function isBrowserImportDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[QWEN_CLOUD_BROWSER_ENV]?.trim().toLowerCase() === "none";
@@ -149,42 +116,6 @@ async function listChromiumBrowserStores(params?: {
   }));
 }
 
-/**
- * Cheap invalidation key: cookie database and companion file identity, mtime,
- * and size.
- *
- * Uses `stat` only, so it is safe to call on every availability check without
- * opening a SQLite database.
- */
-export async function fingerprintBrowserCookieStores(
-  stores: readonly BrowserCookieStore[],
-): Promise<BrowserStoreFingerprint[]> {
-  const fingerprints: BrowserStoreFingerprint[] = [];
-  for (const store of stores) {
-    for (const path of [
-      store.dbPath,
-      ...FINGERPRINT_COMPANION_SUFFIXES.map((suffix) => `${store.dbPath}${suffix}`),
-    ]) {
-      try {
-        const info = await stat(path);
-        fingerprints.push({ path, mtimeMs: info.mtimeMs, size: info.size });
-      } catch {
-        // An absent or vanished companion contributes no fingerprint.
-      }
-    }
-  }
-  return fingerprints.sort((a, b) => (a.path < b.path ? -1 : 1));
-}
-
-export function browserStoresSignature(
-  fingerprints: readonly BrowserStoreFingerprint[],
-): string | null {
-  if (fingerprints.length === 0) return null;
-  return fingerprints
-    .map((item) => `${item.path}:${Math.floor(item.mtimeMs)}:${item.size}`)
-    .join("|");
-}
-
 export interface ImportBrowserSessionOptions {
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
@@ -192,24 +123,18 @@ export interface ImportBrowserSessionOptions {
   stores?: readonly BrowserCookieStore[];
   /** Keyring backend for `v11` values; defaults to the platform's own. */
   keyStore?: SystemKeyStore | null;
-  /** Cookie database paths to try before the recency order, e.g. the last valid session. */
+  /** Cookie database paths to try first, e.g. the store the console accepted last. */
   preferredStorePaths?: readonly string[];
-  /**
-   * Cookie database paths whose session QwenCloud already rejected.
-   *
-   * Exclusion never empties the candidate list: once every store has been
-   * rejected the sweep starts over instead of dead-ending.
-   */
+  /** Cookie database paths whose session QwenCloud already rejected. */
   excludeStorePaths?: readonly string[];
 }
 
 /**
  * Read a QwenCloud login session from the local browsers.
  *
- * Stores are tried most-recently-used first so the common case opens exactly one
- * cookie database and stops as soon as a login ticket is found. A store whose
- * login only exists in an uncheckpointed write-ahead log is re-read once through
- * a private copied snapshot.
+ * A store is only accepted when it holds a login ticket the console hosts would
+ * actually receive, so a profile with an Alibaba-domain ticket alone cannot
+ * shadow a browser that works.
  */
 export async function importBrowserQwenCloudSession(
   params?: ImportBrowserSessionOptions,
@@ -219,226 +144,44 @@ export async function importBrowserQwenCloudSession(
 
   const nowMs = params?.nowMs ?? Date.now();
   const stores = params?.stores ?? (await discoverBrowserCookieStores(params));
-  if (stores.length === 0) return { state: "no_stores" };
-
   const keyStore =
     params?.keyStore === null ? undefined : (params?.keyStore ?? resolveSystemKeyStore());
-  const ordered = orderPreferredFirst(
-    params?.preferredStorePaths ?? [],
-    withoutExcludedStores(await orderStoresByRecency(stores), params?.excludeStorePaths ?? []),
-  );
 
-  // A ticket the console hosts would not receive is not a session: such a store
-  // is passed over so a browser with a usable login wins.
-  const isUsableSession = (cookies: readonly QwenCloudCookie[]): boolean =>
-    hasQwenCloudRequestTickets(cookies, nowMs);
+  return importBrowserSession({
+    stores,
+    nowMs,
+    keyStore,
+    readers: qwenCloudReaders(nowMs),
+    preferredStorePaths: params?.preferredStorePaths,
+    excludeStorePaths: params?.excludeStorePaths,
+  });
+}
 
-  const inspections: BrowserStoreInspection[] = [];
-  let keyringSeen = false;
-  let unreadable = false;
-
-  for (const store of ordered) {
-    const result = await readBrowserCookieStore(store, nowMs, keyStore, isUsableSession);
-    inspections.push(result.inspection);
-    switch (result.read.state) {
-      case "imported": {
-        if (result.read.keyringProtected) keyringSeen = true;
-        if (isUsableSession(result.read.cookies)) {
-          return {
-            state: "imported",
-            store,
-            cookies: result.read.cookies,
-            inspections,
-          };
-        }
-        break;
+function qwenCloudReaders(nowMs: number): BrowserReaders {
+  return {
+    readStore: (store, readNowMs, options: OpenBrowserStoreOptions, keyStore) => {
+      if (store.kind === "firefox") {
+        return readFirefoxCookieDatabase(store.dbPath, readNowMs, options).then(
+          (cookies): BrowserStoreReadResult =>
+            cookies.length > 0
+              ? { state: "imported", cookies, keyringProtected: false }
+              : { state: "no_session" },
+        );
       }
-      case "keyring":
-        keyringSeen = true;
-        break;
-      case "unreadable":
-        unreadable = true;
-        break;
-      case "no_session":
-        break;
-    }
-  }
-
-  const inspected = [...ordered];
-  if (unreadable && !keyringSeen) return { state: "unreadable", stores: inspected, inspections };
-  return { state: "no_session", stores: inspected, keyringSeen, inspections };
-}
-
-type BrowserStoreReadResult =
-  | {
-      state: "imported";
-      cookies: QwenCloudCookie[];
-      keyringProtected: boolean;
-      summary?: BrowserStoreReadSummary;
-    }
-  | { state: "keyring"; summary?: BrowserStoreReadSummary }
-  | { state: "no_session"; summary?: BrowserStoreReadSummary }
-  | { state: "unreadable"; summary?: BrowserStoreReadSummary };
-
-interface StoreReadOutcome {
-  read: BrowserStoreReadResult;
-  inspection: BrowserStoreInspection;
-}
-
-async function readBrowserCookieStore(
-  store: BrowserCookieStore,
-  nowMs: number,
-  keyStore: SystemKeyStore | undefined,
-  isUsableSession: (cookies: readonly QwenCloudCookie[]) => boolean,
-): Promise<StoreReadOutcome> {
-  const options: OpenBrowserStoreOptions & { keyStore?: SystemKeyStore } = keyStore
-    ? { keyStore }
-    : {};
-  const readDirect = (overrides: OpenBrowserStoreOptions = {}): Promise<BrowserStoreReadResult> => {
-    if (store.kind === "firefox") {
-      return readFirefoxCookieDatabase(store.dbPath, nowMs, overrides).then(
-        (cookies): BrowserStoreReadResult =>
-          cookies.length > 0
-            ? { state: "imported", cookies, keyringProtected: false }
-            : { state: "no_session" },
+      return readChromiumQwenCloudCookies(
+        {
+          browser: store.browser,
+          profile: store.profile,
+          rootPath: store.rootPath ?? "",
+          dbPath: store.dbPath,
+          browserId: store.browserId,
+          keyringApplications: store.keyringApplications,
+        },
+        readNowMs,
+        keyStore ? { ...options, keyStore } : options,
       );
-    }
-    return readChromiumQwenCloudCookies(
-      {
-        browser: store.browser,
-        profile: store.profile,
-        rootPath: store.rootPath ?? "",
-        dbPath: store.dbPath,
-        browserId: store.browserId,
-        keyringApplications: store.keyringApplications,
-      },
-      nowMs,
-      { ...options, ...overrides },
-    );
+    },
+    isUsableSession: (cookies: readonly QwenCloudCookie[]) =>
+      hasQwenCloudRequestTickets(cookies, nowMs),
   };
-
-  try {
-    const first = await readDirect();
-    // An immutable snapshot or a busy-locked browser can hide a login that only
-    // exists in the write-ahead log: retry once through a copied snapshot.
-    const missingTicket =
-      (first.state === "imported" && !isUsableSession(first.cookies)) ||
-      first.state === "no_session";
-    if (missingTicket && (await hasNonEmptyCompanionWal(store.dbPath))) {
-      const second = await readDirect({ preferSnapshotCopy: true });
-      if (second.state === "imported" && isUsableSession(second.cookies)) {
-        return { read: second, inspection: inspectStore(store, second, isUsableSession) };
-      }
-      if (second.state !== "unreadable") {
-        return { read: first, inspection: inspectStore(store, first, isUsableSession) };
-      }
-    }
-    return { read: first, inspection: inspectStore(store, first, isUsableSession) };
-  } catch {
-    const read: BrowserStoreReadResult = { state: "unreadable" };
-    return { read, inspection: inspectStore(store, read, isUsableSession) };
-  }
-}
-
-function inspectStore(
-  store: BrowserCookieStore,
-  read: BrowserStoreReadResult,
-  isUsableSession: (cookies: readonly QwenCloudCookie[]) => boolean,
-): BrowserStoreInspection {
-  const base = { browser: store.browser, profile: store.profile };
-  const detail = summarizeRead(read.summary);
-  switch (read.state) {
-    case "imported":
-      return {
-        ...base,
-        outcome: isUsableSession(read.cookies) ? "session" : "no_ticket",
-        ...(detail ? { detail } : {}),
-      };
-    case "keyring":
-      return { ...base, outcome: "keyring", ...(detail ? { detail } : {}) };
-    case "unreadable":
-      return { ...base, outcome: "unreadable", ...(detail ? { detail } : {}) };
-    case "no_session":
-      return {
-        ...base,
-        outcome: (read.summary?.rows ?? 0) > 0 ? "no_ticket" : "no_rows",
-        ...(detail ? { detail } : {}),
-      };
-  }
-}
-
-/** Compact, value-free description of what a store read observed. */
-export function summarizeRead(summary: BrowserStoreReadSummary | undefined): string | undefined {
-  if (!summary) return undefined;
-  const parts: string[] = [`rows=${summary.rows}`];
-  // Protection formats are labelled the way Chromium names them so the detail
-  // cannot be confused with the keyring outcome that follows it.
-  const labels: Record<string, string> = {
-    plaintext: "plain",
-    local: "v10",
-    keyring: "v11",
-    unsupported: "other",
-  };
-  for (const [protection, count] of Object.entries(summary.protections)) {
-    if (count) parts.push(`${labels[protection] ?? protection}=${count}`);
-  }
-  if (summary.schemaVersion) parts.push(`schema=${summary.schemaVersion}`);
-  if (summary.keyring) parts.push(`keyring=${summary.keyring}`);
-  return parts.join(" ");
-}
-
-function orderPreferredFirst(
-  preferredPaths: readonly string[],
-  ordered: readonly BrowserCookieStore[],
-): BrowserCookieStore[] {
-  if (preferredPaths.length === 0) return [...ordered];
-  const preferred = new Set(preferredPaths);
-  const first = ordered.filter((store) => preferred.has(store.dbPath));
-  const rest = ordered.filter((store) => !preferred.has(store.dbPath));
-  return [...first, ...rest];
-}
-
-function withoutExcludedStores(
-  ordered: readonly BrowserCookieStore[],
-  excludedPaths: readonly string[],
-): BrowserCookieStore[] {
-  if (excludedPaths.length === 0) return [...ordered];
-  const excluded = new Set(excludedPaths);
-  const remaining = ordered.filter((store) => !excluded.has(store.dbPath));
-  return remaining.length > 0 ? remaining : [...ordered];
-}
-
-/**
- * Most recently written store first.
- *
- * Write-ahead-log and journal timestamps count as activity: a login that has not
- * been checkpointed yet must still win over an idle profile.
- */
-async function orderStoresByRecency(
-  stores: readonly BrowserCookieStore[],
-): Promise<BrowserCookieStore[]> {
-  const withMtime = await Promise.all(
-    stores.map(async (store) => ({ store, mtimeMs: await storeActivityMs(store.dbPath) })),
-  );
-  return withMtime
-    .sort((a, b) => {
-      if (b.mtimeMs !== a.mtimeMs) return b.mtimeMs - a.mtimeMs;
-      const preferredDiff = Number(b.store.preferred === true) - Number(a.store.preferred === true);
-      if (preferredDiff !== 0) return preferredDiff;
-      return a.store.dbPath < b.store.dbPath ? -1 : 1;
-    })
-    .map((item) => item.store);
-}
-
-async function storeActivityMs(dbPath: string): Promise<number> {
-  let latest = 0;
-  for (const suffix of ["", "-wal", "-journal"]) {
-    try {
-      const info = await stat(`${dbPath}${suffix}`);
-      if (info.mtimeMs > latest) latest = info.mtimeMs;
-    } catch {
-      // An absent companion contributes no activity.
-    }
-  }
-  return latest;
 }

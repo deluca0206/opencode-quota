@@ -1,4 +1,15 @@
+import {
+  browserCookieHostSql,
+  chromiumExpiryToUnixSeconds,
+  cookieExpiryDeadlineMs,
+  cookieHostMatchesRequestHost,
+  cookiePathMatchesUrlPath,
+  hostMatchesAnyDomain,
+  isDefaultCookieContext,
+} from "./browser-cookie-sql.js";
 import type { BrowserCookie } from "./browser-cookie-types.js";
+
+export { chromiumExpiryToUnixSeconds, cookieExpiryDeadlineMs };
 
 export const QWENCLOUD_AUTH_TICKET_COOKIE_NAMES = [
   "login_aliyunid_ticket",
@@ -68,18 +79,7 @@ export function hasAuthTicket(cookies: readonly QwenCloudCookie[]): boolean {
 }
 
 export function isQwenCloudCookieDomain(host: string): boolean {
-  const normalized = normalizeHost(host);
-  if (!normalized) return false;
-  return QWENCLOUD_COOKIE_DOMAINS.some(
-    (domain) => normalized === domain || normalized.endsWith(`.${domain}`),
-  );
-}
-
-const COOKIE_EXPIRY_MS_THRESHOLD = 1_000_000_000_000;
-
-export function cookieExpiryDeadlineMs(expiry: number | undefined): number | undefined {
-  if (expiry === undefined || expiry <= 0) return undefined;
-  return expiry >= COOKIE_EXPIRY_MS_THRESHOLD ? expiry : expiry * 1000;
+  return hostMatchesAnyDomain(host, QWENCLOUD_COOKIE_DOMAINS);
 }
 
 export function cookieMatchesUrl(cookie: QwenCloudCookie, url: URL, nowMs: number): boolean {
@@ -88,10 +88,10 @@ export function cookieMatchesUrl(cookie: QwenCloudCookie, url: URL, nowMs: numbe
     return false;
   }
   if (cookie.secure && url.protocol !== "https:") return false;
-  if (!isDefaultFirefoxContext(cookie.originAttributes)) return false;
+  if (!isDefaultCookieContext(cookie.originAttributes)) return false;
 
   const path = cookie.path && cookie.path.length > 0 ? cookie.path : "/";
-  if (!urlPathMatchesCookie(url.pathname || "/", path)) return false;
+  if (!cookiePathMatchesUrlPath(url.pathname || "/", path)) return false;
 
   if (!cookie.host) return true;
   return cookieMatchesHost(cookie.host, url.hostname);
@@ -131,57 +131,15 @@ export function isAuthorizedQwenCloudRequestUrl(url: URL): boolean {
 }
 
 export function firefoxCookieHostSql(): { sql: string; params: string[] } {
-  return cookieHostSql("host");
+  return browserCookieHostSql("host", QWENCLOUD_COOKIE_DOMAINS);
 }
 
 export function chromiumCookieHostSql(): { sql: string; params: string[] } {
-  return cookieHostSql("host_key");
-}
-
-function cookieHostSql(column: string): { sql: string; params: string[] } {
-  const clauses: string[] = [];
-  const params: string[] = [];
-  const seen = new Set<string>();
-  for (const domain of QWENCLOUD_COOKIE_DOMAINS) {
-    for (const value of [domain, `.${domain}`, `%.${domain}`]) {
-      if (seen.has(value)) continue;
-      seen.add(value);
-      clauses.push(value.startsWith("%") ? `${column} LIKE ?` : `${column} = ?`);
-      params.push(value);
-    }
-  }
-  return { sql: clauses.join(" OR "), params };
-}
-
-/** Chromium stores `expires_utc` as microseconds since 1601-01-01 UTC. */
-const CHROMIUM_EPOCH_OFFSET_MS = 11_644_473_600_000;
-
-export function chromiumExpiryToUnixSeconds(expiresUtc: unknown): number | undefined {
-  if (expiresUtc === null || expiresUtc === undefined) return undefined;
-  const raw =
-    typeof expiresUtc === "bigint" || typeof expiresUtc === "number"
-      ? expiresUtc
-      : String(expiresUtc).trim();
-  if (raw === "") return undefined;
-  let micros: bigint;
-  try {
-    micros = BigInt(raw);
-  } catch {
-    return undefined;
-  }
-  if (micros <= 0n) return undefined;
-  const unixMs = Number(micros / 1000n) - CHROMIUM_EPOCH_OFFSET_MS;
-  return Number.isFinite(unixMs) ? Math.floor(unixMs / 1000) : undefined;
+  return browserCookieHostSql("host_key", QWENCLOUD_COOKIE_DOMAINS);
 }
 
 export function cookieMatchesHost(cookieHost: string, requestHost: string): boolean {
-  const host = normalizeHost(cookieHost);
-  const target = normalizeHost(requestHost);
-  if (!host || !target) return false;
-  if (cookieHost.startsWith(".")) {
-    return target === host || target.endsWith(`.${host}`);
-  }
-  return target === host;
+  return cookieHostMatchesRequestHost(cookieHost, requestHost);
 }
 
 export function getCookieSecrets(cookies: readonly QwenCloudCookie[]): string[] {
@@ -197,18 +155,6 @@ export function sanitizeQwenCloudError(error: unknown, secrets: readonly string[
   return message;
 }
 
-function normalizeHost(host: string): string {
-  return host.trim().replace(/^\./u, "").toLowerCase();
-}
-
-function urlPathMatchesCookie(urlPath: string, cookiePath: string): boolean {
-  if (cookiePath === "/") return true;
-  if (urlPath === cookiePath) return true;
-  const prefix = cookiePath.endsWith("/") ? cookiePath : `${cookiePath}/`;
-  return urlPath.startsWith(prefix);
-}
-
 function isDefaultFirefoxContext(originAttributes: string | undefined): boolean {
-  if (!originAttributes) return true;
-  return !/userContextId=/u.test(originAttributes);
+  return isDefaultCookieContext(originAttributes);
 }

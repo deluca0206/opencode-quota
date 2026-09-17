@@ -9,7 +9,7 @@ import {
   parseFirefoxInstallDefaultPaths,
   parseFirefoxProfilesIni,
   readFirefoxCookieDatabase,
-} from "../src/lib/qwencloud-firefox.js";
+} from "../src/lib/browser-firefox.js";
 
 const tempRoots: string[] = [];
 const NOW_MS = 1_700_000_000_000;
