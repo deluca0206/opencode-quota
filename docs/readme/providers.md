@@ -458,7 +458,7 @@ No environment variable, companion CLI, external command, system package, browse
 1. Sign in at `https://home.qwencloud.com/billing/subscription/token-plan-individual` in the browser you already use.
 2. Run `/quota`. OpenCode Quota finds the browser, reads the session, validates it, and reports quota.
 
-On Linux these browsers are detected: Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, and Opera — native, Flatpak, and Snap installs, release channels included. Every profile is considered, including profiles only named in the browser's own `Local State`, and reading stops at the first profile whose login the console hosts actually accept. Cookie databases are opened read-only and only QwenCloud-related cookies from the default context are used; the original database is never modified.
+On Linux these browsers are detected: Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, and Opera — native, Flatpak, and Snap installs, release channels included. Browser detection itself is Linux-only; see the platform note below. Every profile is considered, including profiles only named in the browser's own `Local State`, and reading stops at the first profile whose login the console hosts actually accept. Cookie databases are opened read-only and only QwenCloud-related cookies from the default context are used; the original database is never modified.
 
 #### Keyring-protected Chromium cookies
 
@@ -467,7 +467,8 @@ Chrome, Chromium, Brave, and Edge encrypt cookie values with a password kept in 
 - GNOME Keyring and any other Secret Service implementation work as-is.
 - If the keyring is locked, the desktop shows its own standard unlock prompt once; dismissing it simply moves the sweep on to the next browser.
 - Passwords are held only in memory for the lifetime of the process, never logged, and never written to disk.
-- A KDE desktop that exposes Secret Service works too. KWallet-only setups without a Secret Service implementation are not covered yet, and Windows app-bound (`v20`) values are out of scope.
+- A KDE desktop that exposes Secret Service works too. KWallet-only setups without a Secret Service implementation are not covered yet.
+- Browser session reading covers **Linux only** for now. macOS Keychain and Windows profiles — including Windows app-bound (`v20`) values — are not read yet; on those platforms the provider stays silent unless a `QWEN_CLOUD_COOKIE` override is set.
 
 #### Browser selection and fallback
 

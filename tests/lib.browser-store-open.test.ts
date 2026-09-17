@@ -1,10 +1,11 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  BROWSER_SNAPSHOT_DIR_PREFIX,
   BROWSER_SQLITE_BUSY_TIMEOUT_MS,
   browserSqliteNormalOpenAttempts,
   detectSqliteCompanionFiles,
@@ -269,6 +270,56 @@ describe("browser cookie database opening", () => {
       writer.exec("ROLLBACK;");
       writer.close();
     }
+  });
+
+  it("prunes a snapshot directory a killed process left behind", async () => {
+    resetBrowserSqliteStateForTests();
+    const stale = await mkdtemp(join(tmpdir(), `${BROWSER_SNAPSHOT_DIR_PREFIX}stale-`));
+    const fresh = await mkdtemp(join(tmpdir(), `${BROWSER_SNAPSHOT_DIR_PREFIX}fresh-`));
+    await writeFile(join(stale, "Cookies"), "leftover");
+    const old = new Date(Date.now() / 1000 - 7200);
+    await utimes(stale, old, old);
+
+    const dir = await createTempDir();
+    const dbPath = join(dir, "cookies.sqlite");
+    const writer = createWalDatabase(dbPath);
+    try {
+      const conn = await openBrowserCookieDatabase(dbPath, { preferSnapshotCopy: true });
+      conn?.close();
+    } finally {
+      writer.close();
+    }
+
+    const remaining = await readdir(tmpdir());
+    expect(remaining).not.toContain(stale.split("/").pop());
+    // A directory another process may still be using is left alone.
+    expect(remaining).toContain(fresh.split("/").pop());
+    await rm(fresh, { recursive: true, force: true });
+  });
+
+  it("prunes leftover snapshot directories only once per process", async () => {
+    resetBrowserSqliteStateForTests();
+    const first = await mkdtemp(join(tmpdir(), `${BROWSER_SNAPSHOT_DIR_PREFIX}once-`));
+    const old = new Date(Date.now() / 1000 - 7200);
+    await utimes(first, old, old);
+
+    const dir = await createTempDir();
+    const dbPath = join(dir, "cookies.sqlite");
+    const writer = createWalDatabase(dbPath);
+    try {
+      const conn = await openBrowserCookieDatabase(dbPath, { preferSnapshotCopy: true });
+      conn?.close();
+      // A directory created after the prune survives until the next process.
+      const second = await mkdtemp(join(tmpdir(), `${BROWSER_SNAPSHOT_DIR_PREFIX}twice-`));
+      await utimes(second, old, old);
+      const secondConn = await openBrowserCookieDatabase(dbPath, { preferSnapshotCopy: true });
+      secondConn?.close();
+      expect(await readdir(tmpdir())).toContain(second.split("/").pop());
+      await rm(second, { recursive: true, force: true });
+    } finally {
+      writer.close();
+    }
+    expect(await readdir(tmpdir())).not.toContain(first.split("/").pop());
   });
 
   it("keeps the host event loop responsive while the store is contended", async () => {

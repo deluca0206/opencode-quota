@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, rm, stat } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -22,6 +22,23 @@ export const BROWSER_NORMAL_OPEN_BUSY_BACKOFF_MS = 10_000;
 
 /** Upper bound for the total size of one copied snapshot (database plus logs). */
 export const MAX_BROWSER_SNAPSHOT_COPY_BYTES = 64 * 1024 * 1024;
+
+/** Private directory a copied snapshot lives in. */
+export const BROWSER_SNAPSHOT_DIR_PREFIX = "opencode-quota-snapshot-";
+
+/**
+ * Age after which a leftover snapshot directory is pruned.
+ *
+ * A snapshot is deleted as soon as its connection closes, but a host process
+ * killed at that exact moment can leave the copy behind. Copies hold browser
+ * cookies, so any survivor is removed on the next snapshot instead of lingering
+ * in the temporary directory. A live read takes milliseconds, so an hour is far
+ * beyond any in-flight use.
+ */
+export const BROWSER_SNAPSHOT_STALE_MS = 60 * 60_000;
+
+/** How many temporary-directory entries one prune inspects. */
+const BROWSER_SNAPSHOT_PRUNE_SCAN_LIMIT = 500;
 
 export type BrowserSqliteCompanion = "wal" | "shm" | "journal";
 
@@ -62,6 +79,7 @@ let lastOpenError: unknown = null;
 
 export function resetBrowserSqliteStateForTests(immutableSupported?: boolean): void {
   immutableUriSupported = immutableSupported ?? null;
+  staleSnapshotsPruned = false;
   normalOpenBusyFailures.clear();
   snapshotCopyFailures.clear();
   normalOpenAttempts.clear();
@@ -203,7 +221,8 @@ async function openCopiedSnapshot(
     const totalBytes = await totalSnapshotBytes(dbPath);
     if (totalBytes === null || totalBytes > maxCopyBytes) return null;
 
-    const dir = await mkdtemp(join(tmpdir(), "opencode-quota-snapshot-"));
+    await pruneStaleSnapshotDirs();
+    const dir = await mkdtemp(join(tmpdir(), BROWSER_SNAPSHOT_DIR_PREFIX));
     try {
       const copyPath = join(dir, basename(dbPath));
       await copyFile(dbPath, copyPath);
@@ -231,6 +250,34 @@ async function openCopiedSnapshot(
     }
   } catch {
     return null;
+  }
+}
+
+let staleSnapshotsPruned = false;
+
+/** Best-effort cleanup of snapshot directories a killed process left behind. */
+async function pruneStaleSnapshotDirs(nowMs: number = Date.now()): Promise<void> {
+  if (staleSnapshotsPruned) return;
+  staleSnapshotsPruned = true;
+  try {
+    const entries = await readdir(tmpdir());
+    let scanned = 0;
+    for (const entry of entries) {
+      if (!entry.startsWith(BROWSER_SNAPSHOT_DIR_PREFIX)) continue;
+      if (scanned >= BROWSER_SNAPSHOT_PRUNE_SCAN_LIMIT) break;
+      scanned += 1;
+      const path = join(tmpdir(), entry);
+      try {
+        const info = await stat(path);
+        if (!info.isDirectory()) continue;
+        if (nowMs - info.mtimeMs < BROWSER_SNAPSHOT_STALE_MS) continue;
+        await rm(path, { recursive: true, force: true });
+      } catch {
+        // A directory another process is using, or one that vanished, is skipped.
+      }
+    }
+  } catch {
+    // An unreadable temporary directory simply keeps its leftovers.
   }
 }
 
