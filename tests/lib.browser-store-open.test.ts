@@ -6,10 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   BROWSER_SQLITE_BUSY_TIMEOUT_MS,
+  browserSqliteNormalOpenAttempts,
   detectSqliteCompanionFiles,
   openBrowserCookieDatabase,
   resetBrowserSqliteStateForTests,
-} from "../src/lib/qwencloud-store-open.js";
+} from "../src/lib/browser-store-open.js";
 
 const tempRoots: string[] = [];
 
@@ -222,23 +223,48 @@ describe("browser cookie database opening", () => {
     conn?.close();
   });
 
+  it("treats a write-ahead log without shared memory as writer activity", async () => {
+    // Only the log carries the uncheckpointed rows, so the plain open has to be
+    // attempted even when no shared-memory or journal file is present.
+    resetBrowserSqliteStateForTests(true);
+    const dir = await createTempDir();
+    const dbPath = join(dir, "Cookies");
+    await writeFile(dbPath, "not a database");
+    await writeFile(`${dbPath}-wal`, "frames");
+
+    await openBrowserCookieDatabase(dbPath);
+    expect(browserSqliteNormalOpenAttempts(dbPath)).toBe(1);
+  });
+
+  it("skips the contended open when a quiet store has no writer artifacts", async () => {
+    resetBrowserSqliteStateForTests(true);
+    const dir = await createTempDir();
+    const dbPath = join(dir, "Cookies");
+    await writeFile(dbPath, "not a database");
+
+    await openBrowserCookieDatabase(dbPath);
+    expect(browserSqliteNormalOpenAttempts(dbPath)).toBe(0);
+  });
+
   it("does not repeat a lost busy wait for the backoff window", async () => {
     resetBrowserSqliteStateForTests(false);
     const dir = await createTempDir();
     const dbPath = join(dir, "Cookies");
     const writer = createExclusiveLockedDatabase(dbPath);
     try {
-      const firstStarted = performance.now();
-      await openBrowserCookieDatabase(dbPath);
-      const firstMs = performance.now() - firstStarted;
+      const first = await openBrowserCookieDatabase(dbPath);
+      first?.close();
+      expect(browserSqliteNormalOpenAttempts(dbPath)).toBe(1);
 
-      const secondStarted = performance.now();
-      await openBrowserCookieDatabase(dbPath);
-      const secondMs = performance.now() - secondStarted;
-
-      // The first call waits out the busy timeout; the second must skip it.
-      expect(firstMs).toBeGreaterThan(BROWSER_SQLITE_BUSY_TIMEOUT_MS / 2);
-      expect(secondMs).toBeLessThan(BROWSER_SQLITE_BUSY_TIMEOUT_MS / 2);
+      const second = await openBrowserCookieDatabase(dbPath);
+      // The contended open is not retried inside the backoff window; the store is
+      // still readable through the private copied snapshot.
+      expect(browserSqliteNormalOpenAttempts(dbPath)).toBe(1);
+      expect(second).not.toBeNull();
+      expect(second?.get<{ name: string }>("SELECT name FROM cookies")).toEqual({
+        name: "login_qwencloud_ticket",
+      });
+      second?.close();
     } finally {
       writer.exec("ROLLBACK;");
       writer.close();

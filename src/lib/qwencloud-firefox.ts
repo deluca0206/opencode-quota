@@ -1,13 +1,13 @@
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { type OpenBrowserStoreOptions, openBrowserCookieDatabase } from "./browser-store-open.js";
 import {
   cookieExpiryDeadlineMs,
   firefoxCookieHostSql,
   isQwenCloudCookieDomain,
   type QwenCloudCookie,
 } from "./qwencloud-cookies.js";
-import { type OpenBrowserStoreOptions, openBrowserCookieDatabase } from "./qwencloud-store-open.js";
 
 export interface FirefoxProfile {
   name: string;

@@ -57,13 +57,26 @@ export async function detectSqliteCompanionFiles(
 let immutableUriSupported: boolean | null = null;
 const normalOpenBusyFailures = new Map<string, number>();
 const snapshotCopyFailures = new Map<string, number>();
+const normalOpenAttempts = new Map<string, number>();
 let lastOpenError: unknown = null;
 
 export function resetBrowserSqliteStateForTests(immutableSupported?: boolean): void {
   immutableUriSupported = immutableSupported ?? null;
   normalOpenBusyFailures.clear();
   snapshotCopyFailures.clear();
+  normalOpenAttempts.clear();
   lastOpenError = null;
+}
+
+/**
+ * How many times a store's plain read-only open was attempted.
+ *
+ * Timing assertions cannot prove that the busy backoff worked, because the
+ * snapshot fallback that replaces a suppressed open has its own cost. Counting
+ * attempts makes the behaviour observable instead.
+ */
+export function browserSqliteNormalOpenAttempts(dbPath: string): number {
+  return normalOpenAttempts.get(dbPath) ?? 0;
 }
 
 async function immutableSnapshotsSupported(dbPath: string): Promise<boolean> {
@@ -135,10 +148,13 @@ export async function openBrowserCookieDatabase(
   }
 
   const companions = await detectSqliteCompanionFiles(dbPath);
-  const writerArtifactsPresent = companions.includes("shm") || companions.includes("journal");
+  // A write-ahead log alone already means a snapshot can miss committed rows, so
+  // it counts as writer activity even without a shared-memory or journal file.
+  const writerArtifactsPresent = companions.length > 0;
 
   const attemptNormalOpen = async (): Promise<SqliteConn | null> => {
     if (normalOpenSuppressed(dbPath, Date.now())) return null;
+    normalOpenAttempts.set(dbPath, (normalOpenAttempts.get(dbPath) ?? 0) + 1);
     const conn = await tryOpen(dbPath, { busyTimeoutMs: BROWSER_SQLITE_BUSY_TIMEOUT_MS });
     if (conn) return conn;
     if (isOpenBusyError(lastOpenError)) {
@@ -160,13 +176,8 @@ export async function openBrowserCookieDatabase(
     return openCopiedSnapshot(dbPath, options?.maxCopyBytes);
   }
 
-  if (writerArtifactsPresent) {
-    const conn = await attemptNormalOpen();
-    if (conn) return conn;
-  } else {
-    const conn = await tryOpen(dbPath, { busyTimeoutMs: BROWSER_SQLITE_BUSY_TIMEOUT_MS });
-    if (conn) return conn;
-  }
+  const conn = await attemptNormalOpen();
+  if (conn) return conn;
   return openCopiedSnapshot(dbPath, options?.maxCopyBytes);
 }
 

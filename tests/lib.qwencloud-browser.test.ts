@@ -25,6 +25,7 @@ import {
   discoverBrowserCookieStores,
   fingerprintBrowserCookieStores,
   importBrowserQwenCloudSession,
+  summarizeRead,
 } from "../src/lib/qwencloud-browser.js";
 
 const tempRoots: string[] = [];
@@ -315,6 +316,231 @@ describe("QwenCloud browser session orchestrator", () => {
       ],
     });
     expect(result).toMatchObject({ state: "unreadable" });
+  });
+
+  it("passes the key store to the Chromium reader and never to Firefox", async () => {
+    const dir = await createTempDir();
+    const ffPath = join(dir, "ff.sqlite");
+    const chromePath = join(dir, "Cookies");
+    await writeFile(ffPath, "ff");
+    await writeFile(chromePath, "chrome");
+    const nowSeconds = Date.now() / 1000;
+    await utimes(ffPath, new Date(nowSeconds), new Date(nowSeconds));
+    await utimes(chromePath, new Date(nowSeconds - 600), new Date(nowSeconds - 600));
+    backendMocks.readFirefoxCookieDatabase.mockResolvedValue([]);
+    backendMocks.readChromiumQwenCloudCookies.mockResolvedValue({
+      state: "imported",
+      cookies: TICKET,
+      keyringProtected: false,
+    });
+    const keyStore = { id: "fake", getSecrets: async () => ({ state: "missing" }) };
+
+    await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      keyStore,
+      stores: [
+        { kind: "firefox" as const, browser: "firefox", profile: "p", dbPath: ffPath },
+        {
+          kind: "chromium" as const,
+          browser: "google-chrome",
+          profile: "Default",
+          dbPath: chromePath,
+          rootPath: dir,
+          keyringApplications: ["chrome"],
+        },
+      ],
+    });
+
+    expect(backendMocks.readFirefoxCookieDatabase).toHaveBeenCalledWith(ffPath, NOW_MS, {});
+    expect(backendMocks.readChromiumQwenCloudCookies).toHaveBeenCalledWith(
+      expect.objectContaining({ browser: "google-chrome", keyringApplications: ["chrome"] }),
+      NOW_MS,
+      { keyStore },
+    );
+  });
+
+  it("reads keyring-protected Chromium stores without a key store as keyring", async () => {
+    backendMocks.readChromiumQwenCloudCookies.mockImplementation(
+      async (_store: unknown, _nowMs: number, options?: { keyStore?: { id: string } }) =>
+        options?.keyStore
+          ? { state: "imported", cookies: TICKET, keyringProtected: false }
+          : { state: "keyring" },
+    );
+    const stores = [
+      {
+        kind: "chromium" as const,
+        browser: "google-chrome",
+        profile: "Default",
+        dbPath: "/tmp/chrome/Cookies",
+        rootPath: "/tmp/chrome",
+        keyringApplications: ["chrome"],
+      },
+    ];
+
+    await expect(
+      importBrowserQwenCloudSession({ env: {}, nowMs: NOW_MS, keyStore: null, stores }),
+    ).resolves.toMatchObject({ state: "no_session", keyringSeen: true });
+
+    const withKeyStore = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      keyStore: { id: "fake", getSecrets: async () => ({ state: "missing" }) },
+      stores,
+    });
+    expect(withKeyStore.state).toBe("imported");
+  });
+
+  it("re-reads through a copied snapshot when the first read found no session at all", async () => {
+    const dir = await createTempDir();
+    const dbPath = join(dir, "cookies.sqlite");
+    await writeFile(dbPath, "db");
+    await writeFile(`${dbPath}-wal`, "un-checkpointed login frame");
+
+    backendMocks.readChromiumQwenCloudCookies.mockImplementation(
+      async (_store: unknown, _nowMs: number, options?: { preferSnapshotCopy?: boolean }) =>
+        options?.preferSnapshotCopy
+          ? { state: "imported", cookies: TICKET, keyringProtected: false }
+          : { state: "no_session" },
+    );
+
+    const result = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      stores: [
+        {
+          kind: "chromium" as const,
+          browser: "google-chrome",
+          profile: "Default",
+          dbPath,
+          rootPath: dir,
+        },
+      ],
+    });
+    expect(result.state).toBe("imported");
+    expect(backendMocks.readChromiumQwenCloudCookies).toHaveBeenCalledTimes(2);
+  });
+
+  it("orders a store with a fresh write-ahead log ahead of a newer idle database", async () => {
+    const dir = await createTempDir();
+    const idlePath = join(dir, "idle.sqlite");
+    const walPath = join(dir, "wal.sqlite");
+    await writeFile(idlePath, "idle");
+    await writeFile(walPath, "wal");
+    await writeFile(`${walPath}-wal`, "fresh login frame");
+
+    const nowSeconds = Date.now() / 1000;
+    await utimes(idlePath, new Date(nowSeconds - 60), new Date(nowSeconds - 60));
+    await utimes(walPath, new Date(nowSeconds - 600), new Date(nowSeconds - 600));
+    await utimes(`${walPath}-wal`, new Date(nowSeconds), new Date(nowSeconds));
+
+    const readOrder: string[] = [];
+    backendMocks.readFirefoxCookieDatabase.mockImplementation(async (dbPath: string) => {
+      readOrder.push(dbPath);
+      return dbPath === walPath ? TICKET : [];
+    });
+
+    const result = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      stores: [
+        { kind: "firefox" as const, browser: "firefox", profile: "idle", dbPath: idlePath },
+        { kind: "firefox" as const, browser: "firefox", profile: "wal", dbPath: walPath },
+      ],
+    });
+    expect(result.state).toBe("imported");
+    expect(readOrder[0]).toBe(walPath);
+  });
+
+  it("tries the preferred stores first without dropping the others", async () => {
+    const dir = await createTempDir();
+    const firstPath = join(dir, "first.sqlite");
+    const secondPath = join(dir, "second.sqlite");
+    await writeFile(firstPath, "first");
+    await writeFile(secondPath, "second");
+    const nowSeconds = Date.now() / 1000;
+    await utimes(firstPath, new Date(nowSeconds), new Date(nowSeconds));
+    await utimes(secondPath, new Date(nowSeconds - 600), new Date(nowSeconds - 600));
+
+    backendMocks.readFirefoxCookieDatabase.mockImplementation(async (dbPath: string) =>
+      dbPath === secondPath ? TICKET : [],
+    );
+
+    const stores = [
+      { kind: "firefox" as const, browser: "firefox", profile: "first", dbPath: firstPath },
+      { kind: "firefox" as const, browser: "firefox", profile: "second", dbPath: secondPath },
+    ];
+    const result = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      stores,
+      preferredStores: [stores[1]],
+    });
+    expect(result.state).toBe("imported");
+    if (result.state !== "imported") return;
+    expect(result.store.profile).toBe("second");
+    expect(backendMocks.readFirefoxCookieDatabase).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a value-free inspection for every store it read", async () => {
+    const dir = await createTempDir();
+    const ffPath = join(dir, "ff.sqlite");
+    const chromePath = join(dir, "Cookies");
+    const lockedPath = join(dir, "locked.sqlite");
+    await writeFile(ffPath, "ff");
+    await writeFile(chromePath, "chrome");
+    await writeFile(lockedPath, "locked");
+
+    backendMocks.readFirefoxCookieDatabase.mockImplementation(async (dbPath: string) => {
+      if (dbPath === lockedPath) throw new Error("database is locked");
+      return [{ name: "cna", value: "anonymous-value", host: ".qwencloud.com" }];
+    });
+    backendMocks.readChromiumQwenCloudCookies.mockResolvedValue({
+      state: "keyring",
+      summary: { rows: 3, protections: { keyring: 3 }, schemaVersion: 24, keyring: "locked" },
+    });
+
+    const result = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      keyStore: null,
+      stores: [
+        { kind: "firefox" as const, browser: "firefox", profile: "p", dbPath: ffPath },
+        {
+          kind: "chromium" as const,
+          browser: "google-chrome",
+          profile: "Default",
+          dbPath: chromePath,
+          rootPath: dir,
+        },
+        { kind: "firefox" as const, browser: "firefox", profile: "locked", dbPath: lockedPath },
+      ],
+    });
+
+    const inspections = result.state === "imported" ? result.inspections : result.inspections;
+    const serialized = JSON.stringify(inspections);
+    expect(serialized).toContain('"outcome":"no_ticket"');
+    expect(serialized).toContain('"outcome":"keyring"');
+    expect(serialized).toContain('"outcome":"unreadable"');
+    expect(serialized).toContain("v11=3");
+    expect(serialized).toContain("schema=24");
+    expect(serialized).toContain("keyring=locked");
+    // Neither cookie values nor database paths may reach the report.
+    expect(serialized).not.toContain("anonymous-value");
+    expect(serialized).not.toContain(dir);
+  });
+
+  it("summarises a store read without exposing values", () => {
+    expect(
+      summarizeRead({
+        rows: 102,
+        protections: { keyring: 100, local: 2 },
+        schemaVersion: 24,
+        keyring: "available",
+      }),
+    ).toBe("rows=102 v11=100 v10=2 schema=24 keyring=available");
+    expect(summarizeRead({ rows: 0, protections: {} })).toBe("rows=0");
+    expect(summarizeRead(undefined)).toBeUndefined();
   });
 
   it("creates no directories while discovering browsers", async () => {

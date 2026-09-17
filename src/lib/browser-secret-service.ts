@@ -4,6 +4,7 @@ import {
   type SystemSecretLookup,
   type SystemSecretRequest,
   systemSecretRequestKey,
+  unavailableSystemKeyStore,
 } from "./browser-keystore.js";
 
 export const SECRET_SERVICE_BUS_NAME = "org.freedesktop.secrets";
@@ -478,4 +479,27 @@ function asBytes(value: unknown): Uint8Array | null {
     return Uint8Array.from(value as number[]);
   }
   return null;
+}
+
+/**
+ * Default key store for the running platform.
+ *
+ * Resolved once per process. Linux uses the Secret Service; everywhere else the
+ * store reports itself unavailable so readers fall back to plaintext and `v10`
+ * values without touching D-Bus.
+ */
+let resolvedKeyStore: SystemKeyStore | null = null;
+
+export function resolveSystemKeyStore(
+  platform: NodeJS.Platform = process.platform,
+): SystemKeyStore {
+  if (!resolvedKeyStore) {
+    resolvedKeyStore =
+      platform === "linux" ? createSecretServiceKeyStore({ platform }) : unavailableSystemKeyStore;
+  }
+  return resolvedKeyStore;
+}
+
+export function resetSystemKeyStoreForTests(): void {
+  resolvedKeyStore = null;
 }

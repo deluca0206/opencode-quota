@@ -1,3 +1,5 @@
+import type { BrowserCookie } from "./browser-cookie-types.js";
+
 export const QWENCLOUD_AUTH_TICKET_COOKIE_NAMES = [
   "login_aliyunid_ticket",
   "login_qwencloud_ticket",
@@ -17,15 +19,12 @@ export const QWENCLOUD_COOKIE_DOMAINS = [
   "console.aliyun.com",
 ] as const;
 
-export interface QwenCloudCookie {
-  name: string;
-  value: string;
-  host?: string;
-  path?: string;
-  expiry?: number;
-  secure?: boolean;
-  originAttributes?: string;
-}
+/**
+ * QwenCloud cookies are plain browser cookies. The alias keeps provider code
+ * readable while the browser readers stay service-independent, and guarantees
+ * the two shapes cannot drift apart.
+ */
+export type QwenCloudCookie = BrowserCookie;
 
 const AUTH_TICKET_NAME_SET = new Set<string>(QWENCLOUD_AUTH_TICKET_COOKIE_NAMES);
 

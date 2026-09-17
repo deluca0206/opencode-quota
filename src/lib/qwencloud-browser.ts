@@ -1,6 +1,10 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
+import type { BrowserStoreReadSummary } from "./browser-cookie-types.js";
+import type { SystemKeyStore } from "./browser-keystore.js";
+import { resolveSystemKeyStore } from "./browser-secret-service.js";
+import { hasNonEmptyCompanionWal, type OpenBrowserStoreOptions } from "./browser-store-open.js";
 import {
   type ChromiumCookieStore,
   listChromiumCookieStores,
@@ -13,7 +17,6 @@ import {
   listFirefoxCookieStores,
   readFirefoxCookieDatabase,
 } from "./qwencloud-firefox.js";
-import { hasNonEmptyCompanionWal, type OpenBrowserStoreOptions } from "./qwencloud-store-open.js";
 
 export const QWEN_CLOUD_BROWSER_ENV = "QWEN_CLOUD_BROWSER";
 export const QWEN_CLOUD_BROWSER_PROFILE_ENV = "QWEN_CLOUD_BROWSER_PROFILE";
@@ -26,18 +29,41 @@ export interface BrowserCookieStore {
   browser: string;
   profile: string;
   dbPath: string;
-  /** Chromium browser root used for the keyring check. */
+  /** Chromium browser root; identifies the Safe Storage keyring entry. */
   rootPath?: string;
-  /** Preferred by the browser's own install metadata. */
+  /** Chromium descriptor id, e.g. `chrome`, `edge`. */
+  browserId?: string;
+  /** libsecret `application` candidates for keyring-protected values. */
+  keyringApplications?: readonly string[];
+  /** Preferred by the browser's own install or profile metadata. */
   preferred?: boolean;
 }
 
+/** Value-free outcome of reading one store, safe to surface in diagnostics. */
+export interface BrowserStoreInspection {
+  browser: string;
+  profile: string;
+  outcome: "session" | "no_ticket" | "no_rows" | "keyring" | "unreadable";
+  /** Protection and keyring counts, never cookie names or values. */
+  detail?: string;
+}
+
 export type BrowserSessionImportResult =
-  | { state: "imported"; store: BrowserCookieStore; cookies: QwenCloudCookie[] }
+  | {
+      state: "imported";
+      store: BrowserCookieStore;
+      cookies: QwenCloudCookie[];
+      inspections: BrowserStoreInspection[];
+    }
   | { state: "no_stores" }
   | { state: "disabled" }
-  | { state: "no_session"; stores: BrowserCookieStore[]; keyringSeen: boolean }
-  | { state: "unreadable"; stores: BrowserCookieStore[] };
+  | {
+      state: "no_session";
+      stores: BrowserCookieStore[];
+      keyringSeen: boolean;
+      inspections: BrowserStoreInspection[];
+    }
+  | { state: "unreadable"; stores: BrowserCookieStore[]; inspections: BrowserStoreInspection[] };
 
 export interface BrowserStoreFingerprint {
   path: string;
@@ -117,6 +143,9 @@ async function listChromiumBrowserStores(params?: {
     profile: store.profile,
     dbPath: store.dbPath,
     rootPath: store.rootPath,
+    browserId: store.browserId,
+    keyringApplications: store.keyringApplications,
+    preferred: store.preferred,
   }));
 }
 
@@ -156,18 +185,28 @@ export function browserStoresSignature(
     .join("|");
 }
 
-/**
- * Read a QwenCloud login session from the local browsers.
- *
- * Stores are tried most-recently-used first so the common case opens exactly one
- * cookie database and stops as soon as a login ticket is found.
- */
-export async function importBrowserQwenCloudSession(params?: {
+export interface ImportBrowserSessionOptions {
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
   nowMs?: number;
   stores?: readonly BrowserCookieStore[];
-}): Promise<BrowserSessionImportResult> {
+  /** Keyring backend for `v11` values; defaults to the platform's own. */
+  keyStore?: SystemKeyStore | null;
+  /** Try these stores before the recency order, e.g. the last valid session. */
+  preferredStores?: readonly BrowserCookieStore[];
+}
+
+/**
+ * Read a QwenCloud login session from the local browsers.
+ *
+ * Stores are tried most-recently-used first so the common case opens exactly one
+ * cookie database and stops as soon as a login ticket is found. A store whose
+ * login only exists in an uncheckpointed write-ahead log is re-read once through
+ * a private copied snapshot.
+ */
+export async function importBrowserQwenCloudSession(
+  params?: ImportBrowserSessionOptions,
+): Promise<BrowserSessionImportResult> {
   const env = params?.env ?? process.env;
   if (isBrowserImportDisabled(env)) return { state: "disabled" };
 
@@ -175,19 +214,33 @@ export async function importBrowserQwenCloudSession(params?: {
   const stores = params?.stores ?? (await discoverBrowserCookieStores(params));
   if (stores.length === 0) return { state: "no_stores" };
 
-  const ordered = await orderStoresByRecency(stores);
+  const keyStore =
+    params?.keyStore === null ? undefined : (params?.keyStore ?? resolveSystemKeyStore());
+  const ordered = orderPreferredFirst(
+    params?.preferredStores ?? [],
+    await orderStoresByRecency(stores),
+  );
+
+  const inspections: BrowserStoreInspection[] = [];
   let keyringSeen = false;
   let unreadable = false;
 
   for (const store of ordered) {
-    const result = await readBrowserCookieStore(store, nowMs);
-    switch (result.state) {
-      case "imported":
-        if (result.keyringProtected) keyringSeen = true;
-        if (hasAuthTicket(result.cookies)) {
-          return { state: "imported", store, cookies: result.cookies };
+    const result = await readBrowserCookieStore(store, nowMs, keyStore);
+    inspections.push(result.inspection);
+    switch (result.read.state) {
+      case "imported": {
+        if (result.read.keyringProtected) keyringSeen = true;
+        if (hasAuthTicket(result.read.cookies)) {
+          return {
+            state: "imported",
+            store,
+            cookies: result.read.cookies,
+            inspections,
+          };
         }
         break;
+      }
       case "keyring":
         keyringSeen = true;
         break;
@@ -200,23 +253,37 @@ export async function importBrowserQwenCloudSession(params?: {
   }
 
   const inspected = [...ordered];
-  if (unreadable && !keyringSeen) return { state: "unreadable", stores: inspected };
-  return { state: "no_session", stores: inspected, keyringSeen };
+  if (unreadable && !keyringSeen) return { state: "unreadable", stores: inspected, inspections };
+  return { state: "no_session", stores: inspected, keyringSeen, inspections };
 }
 
 type BrowserStoreReadResult =
-  | { state: "imported"; cookies: QwenCloudCookie[]; keyringProtected: boolean }
-  | { state: "keyring" }
-  | { state: "no_session" }
-  | { state: "unreadable" };
+  | {
+      state: "imported";
+      cookies: QwenCloudCookie[];
+      keyringProtected: boolean;
+      summary?: BrowserStoreReadSummary;
+    }
+  | { state: "keyring"; summary?: BrowserStoreReadSummary }
+  | { state: "no_session"; summary?: BrowserStoreReadSummary }
+  | { state: "unreadable"; summary?: BrowserStoreReadSummary };
+
+interface StoreReadOutcome {
+  read: BrowserStoreReadResult;
+  inspection: BrowserStoreInspection;
+}
 
 async function readBrowserCookieStore(
   store: BrowserCookieStore,
   nowMs: number,
-): Promise<BrowserStoreReadResult> {
-  const readDirect = (options: OpenBrowserStoreOptions = {}): Promise<BrowserStoreReadResult> => {
+  keyStore?: SystemKeyStore,
+): Promise<StoreReadOutcome> {
+  const options: OpenBrowserStoreOptions & { keyStore?: SystemKeyStore } = keyStore
+    ? { keyStore }
+    : {};
+  const readDirect = (overrides: OpenBrowserStoreOptions = {}): Promise<BrowserStoreReadResult> => {
     if (store.kind === "firefox") {
-      return readFirefoxCookieDatabase(store.dbPath, nowMs, options).then(
+      return readFirefoxCookieDatabase(store.dbPath, nowMs, overrides).then(
         (cookies): BrowserStoreReadResult =>
           cookies.length > 0
             ? { state: "imported", cookies, keyringProtected: false }
@@ -229,9 +296,11 @@ async function readBrowserCookieStore(
         profile: store.profile,
         rootPath: store.rootPath ?? "",
         dbPath: store.dbPath,
+        browserId: store.browserId,
+        keyringApplications: store.keyringApplications,
       },
       nowMs,
-      options,
+      { ...options, ...overrides },
     );
   };
 
@@ -239,32 +308,92 @@ async function readBrowserCookieStore(
     const first = await readDirect();
     // An immutable snapshot or a busy-locked browser can hide a login that only
     // exists in the write-ahead log: retry once through a copied snapshot.
-    if (
-      first.state === "imported" &&
-      !hasAuthTicket(first.cookies) &&
-      (await hasNonEmptyCompanionWal(store.dbPath))
-    ) {
+    const missingTicket =
+      (first.state === "imported" && !hasAuthTicket(first.cookies)) || first.state === "no_session";
+    if (missingTicket && (await hasNonEmptyCompanionWal(store.dbPath))) {
       const second = await readDirect({ preferSnapshotCopy: true });
-      if (second.state === "imported") return second;
+      if (second.state === "imported" && hasAuthTicket(second.cookies)) {
+        return { read: second, inspection: inspectStore(store, second) };
+      }
+      if (second.state !== "unreadable") {
+        return { read: first, inspection: inspectStore(store, first) };
+      }
     }
-    return first;
+    return { read: first, inspection: inspectStore(store, first) };
   } catch {
-    return { state: "unreadable" };
+    const read: BrowserStoreReadResult = { state: "unreadable" };
+    return { read, inspection: inspectStore(store, read) };
   }
 }
 
+function inspectStore(
+  store: BrowserCookieStore,
+  read: BrowserStoreReadResult,
+): BrowserStoreInspection {
+  const base = { browser: store.browser, profile: store.profile };
+  const detail = summarizeRead(read.summary);
+  switch (read.state) {
+    case "imported":
+      return {
+        ...base,
+        outcome: hasAuthTicket(read.cookies) ? "session" : "no_ticket",
+        ...(detail ? { detail } : {}),
+      };
+    case "keyring":
+      return { ...base, outcome: "keyring", ...(detail ? { detail } : {}) };
+    case "unreadable":
+      return { ...base, outcome: "unreadable", ...(detail ? { detail } : {}) };
+    case "no_session":
+      return {
+        ...base,
+        outcome: (read.summary?.rows ?? 0) > 0 ? "no_ticket" : "no_rows",
+        ...(detail ? { detail } : {}),
+      };
+  }
+}
+
+/** Compact, value-free description of what a store read observed. */
+export function summarizeRead(summary: BrowserStoreReadSummary | undefined): string | undefined {
+  if (!summary) return undefined;
+  const parts: string[] = [`rows=${summary.rows}`];
+  // Protection formats are labelled the way Chromium names them so the detail
+  // cannot be confused with the keyring outcome that follows it.
+  const labels: Record<string, string> = {
+    plaintext: "plain",
+    local: "v10",
+    keyring: "v11",
+    unsupported: "other",
+  };
+  for (const [protection, count] of Object.entries(summary.protections)) {
+    if (count) parts.push(`${labels[protection] ?? protection}=${count}`);
+  }
+  if (summary.schemaVersion) parts.push(`schema=${summary.schemaVersion}`);
+  if (summary.keyring) parts.push(`keyring=${summary.keyring}`);
+  return parts.join(" ");
+}
+
+function orderPreferredFirst(
+  preferred: readonly BrowserCookieStore[],
+  ordered: readonly BrowserCookieStore[],
+): BrowserCookieStore[] {
+  if (preferred.length === 0) return [...ordered];
+  const preferredPaths = new Set(preferred.map((store) => store.dbPath));
+  const first = ordered.filter((store) => preferredPaths.has(store.dbPath));
+  const rest = ordered.filter((store) => !preferredPaths.has(store.dbPath));
+  return [...first, ...rest];
+}
+
+/**
+ * Most recently written store first.
+ *
+ * Write-ahead-log and journal timestamps count as activity: a login that has not
+ * been checkpointed yet must still win over an idle profile.
+ */
 async function orderStoresByRecency(
   stores: readonly BrowserCookieStore[],
 ): Promise<BrowserCookieStore[]> {
   const withMtime = await Promise.all(
-    stores.map(async (store) => {
-      try {
-        const info = await stat(store.dbPath);
-        return { store, mtimeMs: info.mtimeMs };
-      } catch {
-        return { store, mtimeMs: 0 };
-      }
-    }),
+    stores.map(async (store) => ({ store, mtimeMs: await storeActivityMs(store.dbPath) })),
   );
   return withMtime
     .sort((a, b) => {
@@ -274,4 +403,17 @@ async function orderStoresByRecency(
       return a.store.dbPath < b.store.dbPath ? -1 : 1;
     })
     .map((item) => item.store);
+}
+
+async function storeActivityMs(dbPath: string): Promise<number> {
+  let latest = 0;
+  for (const suffix of ["", "-wal", "-journal"]) {
+    try {
+      const info = await stat(`${dbPath}${suffix}`);
+      if (info.mtimeMs > latest) latest = info.mtimeMs;
+    } catch {
+      // An absent companion contributes no activity.
+    }
+  }
+  return latest;
 }
