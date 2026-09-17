@@ -35,6 +35,7 @@ import { opencodeZenProvider } from "./opencode-zen.js";
 import { openRouterProvider } from "./openrouter.js";
 import { quotaProvidersProvider } from "./quota-providers.js";
 import { qwenCodeProvider } from "./qwen-code.js";
+import { qwenCloudTokenPlanProvider } from "./qwencloud-token-plan.js";
 import { syntheticProvider } from "./synthetic.js";
 import { xaiProvider } from "./xai.js";
 import { zaiProvider } from "./zai.js";
@@ -48,6 +49,7 @@ const PROVIDERS_BY_ID = {
   kilo: kiloProvider,
   cursor: cursorProvider,
   "qwen-code": qwenCodeProvider,
+  "qwencloud-token-plan": qwenCloudTokenPlanProvider,
   "alibaba-coding-plan": alibabaCodingPlanProvider,
   synthetic: syntheticProvider,
   chutes: chutesProvider,

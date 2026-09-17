@@ -4,11 +4,11 @@
 
 ## On this page
 
-| Find                                 | Go to                                                                                                                                                                                                                 |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Provider support                     | [Pre-configured providers](#pre-configured-providers) · [Custom providers](#custom-providers)                                                                                                                         |
-| Billing, API key, or dashboard setup | [GitHub Copilot](#github-copilot) · [DeepSeek](#deepseek) · [Kilo Gateway](#kilo-gateway) · [Xiaomi MiMo](#xiaomi-mimo) · [Ollama Cloud](#ollama-cloud) · [OpenCode Go](#opencode-go) · [OpenCode Zen](#opencode-zen) |
-| CLI or companion-plugin setup        | [Anthropic](#anthropic-claude) · [Cursor](#cursor) · [Qwen Code](#qwen-code) · [Google Antigravity](#google-antigravity) · [Google AGY](#google-agy-quick-setup) · [Gemini CLI (deprecated)](#gemini-cli)             |
+| Find                                 | Go to                                                                                                                                                                                                                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Provider support                     | [Pre-configured providers](#pre-configured-providers) · [Custom providers](#custom-providers)                                                                                                                                                                            |
+| Billing, API key, or dashboard setup | [GitHub Copilot](#github-copilot) · [DeepSeek](#deepseek) · [Kilo Gateway](#kilo-gateway) · [Qwen/Alibaba Token Plan](#qwencloud-token-plan) · [Xiaomi MiMo](#xiaomi-mimo) · [Ollama Cloud](#ollama-cloud) · [OpenCode Go](#opencode-go) · [OpenCode Zen](#opencode-zen) |
+| CLI or companion-plugin setup        | [Anthropic](#anthropic-claude) · [Cursor](#cursor) · [Qwen Code](#qwen-code) · [Google Antigravity](#google-antigravity) · [Google AGY](#google-agy-quick-setup) · [Gemini CLI (deprecated)](#gemini-cli)                                                                |
 
 ## Pre-configured providers
 
@@ -67,17 +67,18 @@ Business placement describes vendor plan availability. Except for configured Cop
 <details open>
 <summary><strong>Personal</strong></summary>
 
-| Provider                 | Auth/setup                  | Data from      | Reports            |
-| ------------------------ | --------------------------- | -------------- | ------------------ |
-| Alibaba Coding Plan      | Automatic                   | Local estimate | Quota              |
-| DeepSeek                 | Automatic                   | Remote API     | Balance and status |
-| Kimi Code                | Automatic                   | Remote API     | Quota              |
-| MiniMax Token Plan       | Automatic                   | Remote API     | Quota              |
-| MiniMax Token Plan (CN)  | Automatic                   | Remote API     | Quota              |
-| Qwen Code                | [Needs setup](#qwen-code)   | Local estimate | Quota              |
-| Xiaomi MiMo              | [Needs setup](#xiaomi-mimo) | Dashboard API  | Quota and balance  |
-| Z.ai Coding Plan         | Automatic                   | Remote API     | Quota              |
-| Zhipu Coding Plan        | Automatic                   | Remote API     | Quota              |
+| Provider                | Auth/setup                           | Data from      | Reports            |
+| ----------------------- | ------------------------------------ | -------------- | ------------------ |
+| Alibaba Coding Plan     | Automatic                            | Local estimate | Quota              |
+| DeepSeek                | Automatic                            | Remote API     | Balance and status |
+| Kimi Code               | Automatic                            | Remote API     | Quota              |
+| MiniMax Token Plan      | Automatic                            | Remote API     | Quota              |
+| MiniMax Token Plan (CN) | Automatic                            | Remote API     | Quota              |
+| Qwen Code               | [Needs setup](#qwen-code)            | Local estimate | Quota              |
+| Qwen/Alibaba Token Plan | [Needs setup](#qwencloud-token-plan) | Remote API     | Quota              |
+| Xiaomi MiMo             | [Needs setup](#xiaomi-mimo)          | Dashboard API  | Quota and balance  |
+| Z.ai Coding Plan        | Automatic                            | Remote API     | Quota              |
+| Zhipu Coding Plan       | Automatic                            | Remote API     | Quota              |
 
 </details>
 
@@ -99,7 +100,7 @@ The friendly `Quota` label covers quota and rate-limit windows; JSON distinguish
 
 ### Rich accounting rows
 
-OpenCode Zen, NanoGPT, Xiaomi MiMo, Kilo Gateway, DeepSeek, and Cursor use provider-neutral accounting rows. Quota, rate limit, budget, usage, spend, remaining credits, and account balance stay separate: a balance is not remaining allowance, and spend is not a budget percentage.
+OpenCode Zen, NanoGPT, Xiaomi MiMo, Qwen/Alibaba Token Plan, Kilo Gateway, DeepSeek, and Cursor use provider-neutral accounting rows. Quota, rate limit, budget, usage, spend, remaining credits, and account balance stay separate: a balance is not remaining allowance, and spend is not a budget percentage.
 
 Root `accountingDetail` defaults to `"summary"`. Set it to `"detailed"` to admit supplementary balance/status/spend rows and fuller percentage basis where the surface has room. `formatStyle` still controls window selection, while `percentDisplayMode` controls used-versus-remaining percentage direction. Narrow and compact surfaces may omit lower-priority detail.
 
@@ -426,6 +427,60 @@ Runs-out projection is available only when `cursorBillingCycleStartDay` explicit
 Use companion plugin [`opencode-qwencode-auth`](https://github.com/gustavodiasdev/opencode-qwencode-auth#readme). Add it before `@slkiser/opencode-quota` in `opencode.json`.
 
 Qwen's maintained UTC-day request window can show the optional runs-out projection. Its RPM window is rolling and never qualifies.
+
+<a id="qwencloud-token-plan"></a>
+
+### Qwen/Alibaba Token Plan
+
+Qwen/Alibaba Token Plan reads the international Personal console (`home.qwencloud.com`) for provider-reported **5-hour** and **Weekly** credit windows. Plan names Lite, Standard, and Pro come from the subscription response. Credit totals come from quota-config when present; used and remaining credits are derived from the reported used fraction and those totals. A Token Plan API key such as `sk-sp-...` activates the provider but is never used to read quota.
+
+This is a different product from Alibaba Coding Plan, which is a separate automatic provider.
+
+This integration calls undocumented QwenCloud console gateway endpoints. The contract can change without notice.
+
+### Activation
+
+The provider stays silent until Qwen/Alibaba Token Plan is relevant to you. It activates when either is true:
+
+- OpenCode holds a `qwencloud-token-plan` or `alibaba-token-plan` credential in `auth.json`, or
+- the current session uses one of those provider ids.
+
+Once activated, quota comes from the console session. If that session is missing, the row explains what to do:
+
+```
+Qwen/Alibaba Token Plan: Access https://home.qwencloud.com/billing/subscription/token-plan-individual to show your quota.
+```
+
+### Console session
+
+No environment variable, companion CLI, or external command is required:
+
+1. Sign in at `https://home.qwencloud.com/billing/subscription/token-plan-individual` in the browser you already use.
+2. Run `/quota`. OpenCode Quota reads the session from your local browser profile.
+
+On Linux these browsers are detected: Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, and Opera, including Flatpak and Snap installs. Every profile is considered, the most recently used cookie database is read first, and reading stops at the first login ticket. Databases are opened read-only, never copied, and only QwenCloud-related cookies from the default context are used.
+
+Reading never waits long on a running browser. When the browser holds its cookie database or keeps a fresh login in its write-ahead log, the store is re-read through a private temporary copy (deleted immediately after use), so a sign-in performed with the browser open shows up within a few seconds — no browser restart. If even that fails, the last successfully read session is reused for up to ten minutes (marked as stale in `/quota_status`) and a fresh read retries within about thirty seconds.
+
+Optional overrides:
+
+| Variable                     | Purpose                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `QWEN_CLOUD_COOKIE`          | Use a copied `Cookie` header instead of any browser. Takes precedence.       |
+| `QWEN_CLOUD_BROWSER_PROFILE` | Pin one profile name or cookie database path when several profiles exist.    |
+| `QWEN_CLOUD_BROWSER=none`    | Disable all local browser reads.                                            |
+
+To copy a header manually:
+
+1. Sign in at `https://home.qwencloud.com/billing/subscription/token-plan-individual`.
+2. Open Developer Tools, then **Network**.
+3. Copy a request `Cookie` header from that page into `QWEN_CLOUD_COOKIE`.
+
+Do not put cookies in a repository or workspace config. A present invalid `QWEN_CLOUD_COOKIE` blocks browser detection. China/Team Alibaba consoles are out of scope.
+
+Chromium browsers that protect cookies with an OS keyring cannot be decrypted without a native secret-service binding, so they are skipped and `/quota_status` reports a keyring hint. Use a browser without keyring protection, or set `QWEN_CLOUD_COOKIE`.
+
+The OpenCode provider IDs are `qwencloud-token-plan` and `alibaba-token-plan`. In manual provider mode, include canonical `qwencloud-token-plan` in `enabledProviders`.
 
 OpenCode Quota's Google integrations use independent community companion plugins. They are not endorsed by Google.
 

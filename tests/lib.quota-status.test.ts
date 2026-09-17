@@ -1523,6 +1523,7 @@ kimi:
 opencode_go:
 opencode_zen:
 xiaomi:
+qwencloud_token_plan:
 zai:
 zhipu:
 synthetic:

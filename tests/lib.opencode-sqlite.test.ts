@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import { openOpenCodeSqliteReadOnly } from "../src/lib/opencode-sqlite.js";
+import { openOpenCodeSqliteReadOnly, sqliteDatabasePath } from "../src/lib/opencode-sqlite.js";
 
 const runtimePaths = vi.hoisted(() => ({ dataDirs: [] as string[] }));
 
@@ -65,6 +65,34 @@ describe("opencode sqlite adapter", () => {
         ).toEqual([{ provider: "copilot" }, { provider: "qwen" }]);
       } finally {
         conn.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a locked SQLite database through an immutable URI", async () => {
+    const sqlite = await importNodeSqlite();
+    if (!sqlite) {
+      console.warn(
+        "Skipping immutable SQLite coverage because this Node runtime does not provide node:sqlite.",
+      );
+      return;
+    }
+
+    const dir = await mkdtemp(join(tmpdir(), "opencode-sqlite-lock-"));
+    const dbPath = join(dir, "cookies.sqlite");
+    try {
+      const writer = new sqlite.DatabaseSync(dbPath);
+      writer.exec("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (7);");
+      writer.exec("BEGIN EXCLUSIVE;");
+      const conn = await openOpenCodeSqliteReadOnly(dbPath, { immutable: true });
+      try {
+        expect(sqliteDatabasePath(dbPath, { immutable: true })).toContain("immutable=1");
+        expect(conn.get<{ id: number }>("SELECT id FROM t")).toEqual({ id: 7 });
+      } finally {
+        conn.close();
+        writer.close();
       }
     } finally {
       await rm(dir, { recursive: true, force: true });

@@ -40,6 +40,11 @@ import type {
 } from "../lib/quota-providers.js";
 import { resolveQuotaProviderApiKey } from "../lib/quota-providers-remote.js";
 import {
+  DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
+  qwenCloudSessionCookieHeader,
+  resolveQwenCloudAuthCached,
+} from "../lib/qwencloud-auth.js";
+import {
   composeResolvedAuthIdentities,
   deriveResolvedAuthIdentity,
   type ResolvedAuthIdentity,
@@ -140,6 +145,14 @@ export const PROVIDER_CACHE_POLICIES = {
   }),
   cursor: UNCACHED,
   "qwen-code": UNCACHED,
+  "qwencloud-token-plan": resolvedCredentialPolicy("qwencloud-token-plan", async () => {
+    const resolved = await resolveQwenCloudAuthCached({
+      maxAgeMs: DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
+    });
+    return resolved.state === "configured"
+      ? { credential: qwenCloudSessionCookieHeader(resolved.session, "api") }
+      : null;
+  }),
   "alibaba-coding-plan": resolvedCredentialPolicy("alibaba-coding-plan", async () => {
     const resolved = await resolveAlibabaCodingPlanAuthCached({
       maxAgeMs: DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,

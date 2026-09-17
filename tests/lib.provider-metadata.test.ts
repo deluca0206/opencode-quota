@@ -68,6 +68,15 @@ describe("provider-metadata", () => {
         quickSetupAnchor: "qwen-code",
       },
       {
+        id: "qwencloud-token-plan",
+        autoSetup: "needs_quick_setup",
+        authentication: "state_only",
+        quota: "remote_api",
+        quickSetupAnchor: "qwencloud-token-plan",
+        notes:
+          "Reads QwenCloud international Personal Token Plan quota from the console session; activates on a registered Qwen/Alibaba Token Plan credential and detects the signed-in local browser automatically",
+      },
+      {
         id: "alibaba-coding-plan",
         autoSetup: "yes",
         authentication: "opencode_auth_api_key",
@@ -305,6 +314,10 @@ describe("provider-metadata", () => {
     expect(QUOTA_PROVIDER_RUNTIME_IDS.deepseek).toEqual(["deepseek"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.opencode).toEqual(["opencode", "opencode-zen"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.xai).toEqual(["xai"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS["qwencloud-token-plan"]).toEqual([
+      "qwencloud-token-plan",
+      "alibaba-token-plan",
+    ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.xiaomi).toEqual([
       "xiaomi",
       "xiaomi-token-plan-cn",
@@ -465,6 +478,9 @@ describe("provider-metadata", () => {
     expect(getQuotaProviderDisplayLabel("google-agy")).toBe("Google AGY");
     expect(getQuotaProviderDisplayLabel("cursor")).toBe("Cursor");
     expect(getQuotaProviderDisplayLabel("alibaba-coding-plan")).toBe("Alibaba Coding Plan");
+    expect(getQuotaProviderDisplayLabel("qwencloud-token-plan")).toBe("Qwen/Alibaba Token Plan");
+    expect(getQuotaProviderDisplayLabel("alibaba-token-plan")).toBe("Qwen/Alibaba Token Plan");
+    expect(getQuotaProviderDisplayLabel("qwencloud")).toBe("Qwen/Alibaba Token Plan");
     expect(getQuotaProviderDisplayLabel("synthetic")).toBe("Synthetic");
     expect(getQuotaProviderDisplayLabel("zai")).toBe("Z.ai");
     expect(getQuotaProviderDisplayLabel("zhipu")).toBe("Zhipu");

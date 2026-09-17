@@ -128,6 +128,20 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     },
   },
   {
+    id: "qwencloud-token-plan",
+    label: "Qwen/Alibaba Token Plan",
+    runtimeIds: ["qwencloud-token-plan", "alibaba-token-plan"],
+    synonyms: ["qwencloud", "alibaba-token-plan"],
+    shape: {
+      autoSetup: "needs_quick_setup",
+      authentication: "state_only",
+      quota: "remote_api",
+      quickSetupAnchor: "qwencloud-token-plan",
+      notes:
+        "Reads QwenCloud international Personal Token Plan quota from the console session; activates on a registered Qwen/Alibaba Token Plan credential and detects the signed-in local browser automatically",
+    },
+  },
+  {
     id: "alibaba-coding-plan",
     label: "Alibaba Coding Plan",
     runtimeIds: ["alibaba-coding-plan"],

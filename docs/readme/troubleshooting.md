@@ -232,6 +232,26 @@ Run `/quota_status` and check the Gemini CLI live probe rows.
 </details>
 
 <details>
+<summary><strong>Qwen/Alibaba Token Plan</strong></summary>
+
+Run `/quota_status` and check the `qwencloud_token_plan` section. Diagnostics show auth state and source, never cookie values, `sec_token`, or raw responses.
+
+| Symptom                             | Fix                                                                                                                                      |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider not detected               | Register a `qwencloud-token-plan` / `alibaba-token-plan` credential in OpenCode, or use that provider in the session. Then sign in at `home.qwencloud.com`. |
+| Just signed in with the browser open | The store is read again through a private temporary copy within a few seconds; no browser restart is needed. |
+| Quota marked as last known session  | The browser is holding its cookie database. The last successfully read session is reused for up to ten minutes and a fresh read retries within about thirty seconds. |
+| Wrong browser or profile used       | The most recently used profile is read first. Pin one with `QWEN_CLOUD_BROWSER_PROFILE`.                |
+| Keyring hint in `/quota_status`     | Chromium cookies are OS-keyring protected and cannot be read locally. Use another browser or `QWEN_CLOUD_COOKIE`. |
+| Login required                      | Refresh the QwenCloud console session in your browser, or replace `QWEN_CLOUD_COOKIE`. The browser can stay open. |
+| Quota refresh feels slow            | The console API answers in seconds. One refresh is bounded by a total budget and cached for `minIntervalMs`. |
+| Provider not enabled in manual mode | Include canonical `qwencloud-token-plan` in `enabledProviders`.                                                                          |
+| Only percentages appear             | Quota-config was missing; totals are omitted rather than invented.                                                                       |
+| API key does not show quota         | Token Plan keys are not a quota source. Use the QwenCloud console session.                                                               |
+
+</details>
+
+<details>
 <summary><strong>Xiaomi MiMo</strong></summary>
 
 Run `/quota_status` and check the `xiaomi` section. Diagnostics show state, source, checked paths, and safe live summaries, never cookie names, cookie values, or raw responses.

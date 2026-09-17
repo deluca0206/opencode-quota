@@ -12,6 +12,7 @@ const EXPECTED_PROVIDER_ORDER = [
   "kilo",
   "cursor",
   "qwen-code",
+  "qwencloud-token-plan",
   "alibaba-coding-plan",
   "synthetic",
   "chutes",

@@ -612,6 +612,14 @@ function supportedProviderPricingRow(params: {
     };
   }
 
+  if (id === "qwencloud-token-plan") {
+    return {
+      id,
+      pricing: "no",
+      notes: "QwenCloud Personal Token Plan 5-hour and weekly credit windows",
+    };
+  }
+
   if (id === "kimi-for-coding" || id === "kimi-code") {
     return {
       id,
@@ -929,6 +937,11 @@ export async function buildQuotaStatusReport(params: {
     },
     { id: "opencode_zen", title: "opencode_zen:", providerId: "opencode" },
     { id: "xiaomi", title: "xiaomi:", providerId: "xiaomi" },
+    {
+      id: "qwencloud_token_plan",
+      title: "qwencloud_token_plan:",
+      providerId: "qwencloud-token-plan",
+    },
     { id: "zai", title: "zai:", providerId: "zai" },
     { id: "zhipu", title: "zhipu:", providerId: "zhipu" },
     { id: "synthetic", title: "synthetic:", providerId: "synthetic" },

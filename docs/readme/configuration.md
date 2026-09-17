@@ -464,6 +464,8 @@ OpenCode Go has no `quota-toast.json` workspace ID, cookie, endpoint, credential
 
 Xiaomi MiMo has no `quota-toast.json` credential or endpoint setting. Use `MIMO_USAGE_COOKIE` or trusted user/global `opencode-quota/mimo.json`; see [Xiaomi MiMo setup](providers.md#xiaomi-mimo).
 
+Qwen/Alibaba Token Plan has no `quota-toast.json` credential or endpoint setting. Sign in at `home.qwencloud.com` in your usual browser and it is detected automatically. Optional: `QWEN_CLOUD_COOKIE`, `QWEN_CLOUD_BROWSER_PROFILE`, or `QWEN_CLOUD_BROWSER=none`; see [Qwen/Alibaba Token Plan setup](providers.md#qwencloud-token-plan).
+
 **Removed Zen setting:** `opencodeZenDisplay` is no longer supported. Runtime loading stays diagnostic-only: if a file-backed, SDK, or legacy config source contains the key, `/quota_status` reports a nonfatal migration issue and does not translate it. The explicit `update` command migrates recognized file-backed `"default"` to root `accountingDetail: "summary"` and `"detailed"` to `"detailed"`. If a valid `accountingDetail` already exists, it stays authoritative and the ignored old key is removed. Unknown or invalid values, invalid replacements, duplicate keys, ambiguous structures, and SDK-only sources remain unchanged for manual review. See [Updating safely](updating.md#what-can-change-automatically).
 
 ### Export settings

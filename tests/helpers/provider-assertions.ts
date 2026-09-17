@@ -125,6 +125,14 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       authority: "locally_derived",
     },
   ],
+  "qwencloud-token-plan": [
+    {
+      resultType: "quota",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+  ],
   "alibaba-coding-plan": [
     {
       resultType: "quota",
