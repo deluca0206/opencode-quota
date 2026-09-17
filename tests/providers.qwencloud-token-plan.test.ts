@@ -12,12 +12,16 @@ const mocks = vi.hoisted(() => ({
   queryQwenCloudTokenPlan: vi.fn(),
   isQwenCloudTokenPlanActivated: vi.fn(),
   qwenCloudSessionActivation: vi.fn(),
+  markQwenCloudSessionRejected: vi.fn(),
+  markQwenCloudSessionValidated: vi.fn(),
 }));
 
 vi.mock("../src/lib/qwencloud-auth.js", () => ({
   DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS: 300_000,
   resolveQwenCloudAuthCached: mocks.resolveQwenCloudAuthCached,
   resolveQwenCloudAuthWithDiagnostics: mocks.resolveQwenCloudAuthWithDiagnostics,
+  markQwenCloudSessionRejected: mocks.markQwenCloudSessionRejected,
+  markQwenCloudSessionValidated: mocks.markQwenCloudSessionValidated,
   qwenCloudSessionCookieHeader: vi.fn(),
 }));
 
@@ -56,6 +60,7 @@ function setAuth(auth: Record<string, unknown>, diagnostics?: Record<string, unk
       error: auth.error ?? null,
       note: auth.note ?? null,
       browsers: [],
+      inspections: [],
       ...diagnostics,
     },
   });
@@ -75,6 +80,9 @@ function configured(): void {
 describe("Qwen/Alibaba Token Plan provider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Queued one-shot resolutions from a previous case must not leak into this one.
+    mocks.resolveQwenCloudAuthWithDiagnostics.mockReset();
+    mocks.queryQwenCloudTokenPlan.mockReset();
     setAuth({ state: "none", note: "no QwenCloud login ticket in local browsers" });
     mocks.isQwenCloudTokenPlanActivated.mockResolvedValue({ activated: false, source: null });
     mocks.qwenCloudSessionActivation.mockReturnValue(null);
@@ -179,6 +187,173 @@ describe("Qwen/Alibaba Token Plan provider", () => {
     const result = await qwenCloudTokenPlanProvider.fetch(context());
     expectAttemptedWithErrorLabel(result, "Qwen/Alibaba Token Plan");
     expect(JSON.stringify(result)).not.toContain("login_qwencloud_ticket");
+  });
+
+  function browserAuth(browserProfile: string, storePath: string) {
+    return {
+      state: "configured",
+      source: `browser:${browserProfile}`,
+      storePath,
+      session: {
+        dashboardCookies: [{ name: "login_qwencloud_ticket", value: "ticket-secret" }],
+        apiCookies: [{ name: "login_qwencloud_ticket", value: "ticket-secret" }],
+      },
+    };
+  }
+
+  function browserDiagnostics(auth: Record<string, unknown>, inspections: unknown[] = []) {
+    return {
+      state: "configured",
+      source: auth.source ?? null,
+      error: null,
+      note: null,
+      browsers: [String(auth.source).replace("browser:", "")],
+      inspections,
+    };
+  }
+
+  const standardSnapshot = {
+    success: true,
+    secTokenSource: "cookie",
+    snapshot: {
+      planCode: "standard",
+      planName: "Standard",
+      weekly: {
+        usedFraction: 0.2,
+        percentRemaining: 80,
+        limit: 10000,
+        used: 2000,
+        remaining: 8000,
+        resetTimeIso: "2026-07-26T09:15:00.000Z",
+      },
+    },
+  };
+
+  const loginRequired = {
+    success: false,
+    error: "QwenCloud login required. Sign in at home.qwencloud.com and retry.",
+    reason: "login_required",
+  };
+
+  it("falls back to the next browser profile when the console rejects the session", async () => {
+    const chrome = browserAuth("google-chrome/Default", "/tmp/chrome/Cookies");
+    const firefox = browserAuth("firefox/default-release", "/tmp/firefox/cookies.sqlite");
+    mocks.resolveQwenCloudAuthWithDiagnostics
+      .mockResolvedValueOnce({ auth: chrome, diagnostics: browserDiagnostics(chrome) })
+      .mockResolvedValueOnce({ auth: firefox, diagnostics: browserDiagnostics(firefox) });
+    mocks.queryQwenCloudTokenPlan
+      .mockResolvedValueOnce(loginRequired)
+      .mockResolvedValueOnce(standardSnapshot);
+
+    const result = await qwenCloudTokenPlanProvider.fetch(context());
+    expectAttemptedWithNoErrors(result);
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(2);
+    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledWith(
+      "browser:google-chrome/Default",
+    );
+    expect(mocks.markQwenCloudSessionValidated).toHaveBeenCalledWith(
+      "browser:firefox/default-release",
+    );
+    const report = result.statusDetails?.find(
+      (detail: { key: string }) => detail.key === "auth_source",
+    );
+    expect(report?.value).toBe("browser:firefox/default-release");
+  });
+
+  it("keeps a transport failure from discarding a session", async () => {
+    const chrome = browserAuth("google-chrome/Default", "/tmp/chrome/Cookies");
+    mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValue({
+      auth: chrome,
+      diagnostics: browserDiagnostics(chrome),
+    });
+    mocks.queryQwenCloudTokenPlan.mockResolvedValue({
+      success: false,
+      error: "QwenCloud request timed out.",
+      retryable: true,
+      reason: "transport",
+    });
+
+    const result = await qwenCloudTokenPlanProvider.fetch(context());
+    expect(result.attempted).toBe(true);
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(1);
+    expect(mocks.markQwenCloudSessionRejected).not.toHaveBeenCalled();
+    expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
+  });
+
+  it("bounds how many profiles one refresh validates", async () => {
+    const profiles = ["google-chrome/Default", "brave-browser/Default", "firefox/a", "firefox/b"];
+    for (const [index, profile] of profiles.entries()) {
+      const auth = browserAuth(profile, `/tmp/store-${index}`);
+      mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValueOnce({
+        auth,
+        diagnostics: browserDiagnostics(auth),
+      });
+    }
+    mocks.queryQwenCloudTokenPlan.mockResolvedValue(loginRequired);
+
+    const result = await qwenCloudTokenPlanProvider.fetch(context());
+    expect(result.attempted).toBe(true);
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(3);
+    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(2);
+    expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
+  });
+
+  it("stops the sweep when the next resolution has no other session", async () => {
+    const chrome = browserAuth("google-chrome/Default", "/tmp/chrome/Cookies");
+    mocks.resolveQwenCloudAuthWithDiagnostics
+      .mockResolvedValueOnce({ auth: chrome, diagnostics: browserDiagnostics(chrome) })
+      .mockResolvedValueOnce({
+        auth: { state: "none", note: "no QwenCloud login ticket in local browsers" },
+        diagnostics: {
+          state: "none",
+          source: null,
+          error: null,
+          note: null,
+          browsers: [],
+          inspections: [],
+        },
+      });
+    mocks.queryQwenCloudTokenPlan.mockResolvedValue(loginRequired);
+
+    await qwenCloudTokenPlanProvider.fetch(context());
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a value-free per-store inspection in the status details", async () => {
+    const chrome = browserAuth("google-chrome/Default", "/tmp/chrome/Cookies");
+    mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValue({
+      auth: chrome,
+      diagnostics: browserDiagnostics(chrome, [
+        {
+          browser: "google-chrome",
+          profile: "Default",
+          outcome: "session",
+          detail: "rows=102 v11=102 schema=24 keyring=available",
+        },
+        { browser: "firefox", profile: "dev", outcome: "no_rows", detail: "rows=0" },
+      ]),
+    });
+    mocks.queryQwenCloudTokenPlan.mockResolvedValue(standardSnapshot);
+
+    const result = await qwenCloudTokenPlanProvider.fetch(context());
+    const report = result.statusDetails?.find(
+      (detail: { key: string }) => detail.key === "browser_session_report",
+    );
+    expect(report?.value).toBe(
+      "google-chrome/Default: session (rows=102 v11=102 schema=24 keyring=available); firefox/dev: no_rows (rows=0)",
+    );
+    const serialized = JSON.stringify(result.statusDetails);
+    expect(serialized).not.toContain("ticket-secret");
+    expect(serialized).not.toContain("/tmp/chrome");
+  });
+
+  it("records a validated session so its store is preferred next time", async () => {
+    configured();
+    mocks.queryQwenCloudTokenPlan.mockResolvedValue(standardSnapshot);
+    await qwenCloudTokenPlanProvider.fetch(context());
+    expect(mocks.markQwenCloudSessionValidated).toHaveBeenCalledWith(
+      "browser:firefox/default-release",
+    );
   });
 
   it("maps Pro windows with derived credit facts", async () => {

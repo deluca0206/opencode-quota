@@ -65,6 +65,113 @@ describe("QwenCloud auth resolution", () => {
     return await import("../src/lib/qwencloud-auth.js");
   }
 
+  it("keeps a console-rejected store out of the next sweep and prefers a validated one", async () => {
+    const ticket = [{ name: "login_qwencloud_ticket", value: "ff-secret", host: ".qwencloud.com" }];
+    browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
+      state: "imported",
+      store: STORE,
+      cookies: ticket,
+      inspections: [{ browser: "firefox", profile: "default-release", outcome: "session" }],
+    });
+    const {
+      resolveQwenCloudAuth,
+      markQwenCloudSessionRejected,
+      markQwenCloudSessionValidated,
+      qwenCloudRejectedStorePaths,
+    } = await loadAuth();
+
+    await resolveQwenCloudAuth({ nowMs: 1_000 });
+    expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ preferredStorePaths: [], excludeStorePaths: [] }),
+    );
+
+    // The console accepted this session, so its store is tried first next time.
+    markQwenCloudSessionValidated("browser:firefox/default-release");
+    // Past the re-import throttle, so a fingerprint change forces a new sweep.
+    browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(10_000));
+    await resolveQwenCloudAuth({ nowMs: 10_000 });
+    expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ preferredStorePaths: [STORE.dbPath], excludeStorePaths: [] }),
+    );
+
+    // The console later rejects it: the store is skipped and never reused as the
+    // last known good session.
+    markQwenCloudSessionRejected("browser:firefox/default-release");
+    expect(qwenCloudRejectedStorePaths()).toEqual([STORE.dbPath]);
+    browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
+      state: "no_session",
+      stores: [STORE],
+      keyringSeen: false,
+      inspections: [{ browser: "firefox", profile: "default-release", outcome: "no_ticket" }],
+    });
+    browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(20_000));
+    await expect(resolveQwenCloudAuth({ nowMs: 20_000 })).resolves.toMatchObject({ state: "none" });
+    expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ excludeStorePaths: [STORE.dbPath] }),
+    );
+  });
+
+  it("ignores a rejection that does not match the resolved session", async () => {
+    browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
+      state: "imported",
+      store: STORE,
+      cookies: [{ name: "login_qwencloud_ticket", value: "ff-secret", host: ".qwencloud.com" }],
+      inspections: [],
+    });
+    const { resolveQwenCloudAuth, markQwenCloudSessionRejected, qwenCloudRejectedStorePaths } =
+      await loadAuth();
+    await resolveQwenCloudAuth({ nowMs: 1_000 });
+    markQwenCloudSessionRejected("browser:google-chrome/Default");
+    expect(qwenCloudRejectedStorePaths()).toEqual([]);
+  });
+
+  it("reports value-free store inspections through diagnostics", async () => {
+    browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
+      state: "no_session",
+      stores: [STORE, CHROMIUM_STORE],
+      keyringSeen: true,
+      inspections: [
+        { browser: "firefox", profile: "default-release", outcome: "no_rows", detail: "rows=0" },
+        {
+          browser: "google-chrome",
+          profile: "Default",
+          outcome: "keyring",
+          detail: "rows=102 v11=102 schema=24 keyring=locked",
+        },
+      ],
+    });
+    const { getQwenCloudAuthDiagnostics } = await loadAuth();
+    const diagnostics = await getQwenCloudAuthDiagnostics({ nowMs: 1_000 });
+    expect(diagnostics.inspections).toEqual([
+      { browser: "firefox", profile: "default-release", outcome: "no_rows", detail: "rows=0" },
+      {
+        browser: "google-chrome",
+        profile: "Default",
+        outcome: "keyring",
+        detail: "rows=102 v11=102 schema=24 keyring=locked",
+      },
+    ]);
+    expect(diagnostics.note).toContain("keyring");
+    expect(diagnostics.note).not.toContain("QWEN_CLOUD_COOKIE");
+    expect(JSON.stringify(diagnostics)).not.toContain("/tmp/chrome");
+  });
+
+  it("bounds the number of reported inspections", async () => {
+    browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
+      state: "no_session",
+      stores: [STORE],
+      keyringSeen: false,
+      inspections: Array.from({ length: 20 }, (_, index) => ({
+        browser: "firefox",
+        profile: `p${index}`,
+        outcome: "no_rows" as const,
+      })),
+    });
+    const { getQwenCloudAuthDiagnostics, QWENCLOUD_MAX_REPORTED_INSPECTIONS } = await loadAuth();
+    const diagnostics = await getQwenCloudAuthDiagnostics({ nowMs: 1_000 });
+    expect(diagnostics.inspections).toHaveLength(QWENCLOUD_MAX_REPORTED_INSPECTIONS);
+  });
+
   it("prefers a valid environment cookie header without browser I/O", async () => {
     process.env.QWEN_CLOUD_COOKIE = "login_qwencloud_ticket=env-secret; cna=anon";
     const { resolveQwenCloudAuth } = await loadAuth();

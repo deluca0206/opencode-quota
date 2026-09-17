@@ -108,6 +108,23 @@ export function cookiesForUrl(
   return cookies.filter((cookie) => cookieMatchesUrl(cookie, url, nowMs));
 }
 
+/**
+ * Whether these cookies can actually authenticate a QwenCloud request.
+ *
+ * A login ticket scoped to another Alibaba host (`login_aliyunid_ticket` on
+ * `.aliyun.com`, for example) is a valid cookie but is never sent to the console,
+ * so a browser holding only that must not be selected as the session source.
+ * Mirrors the guard the API client applies before it sends anything.
+ */
+export function hasQwenCloudRequestTickets(
+  cookies: readonly QwenCloudCookie[],
+  nowMs: number,
+): boolean {
+  return QWENCLOUD_REQUEST_HOSTS.every((host) =>
+    hasAuthTicket(cookiesForUrl(cookies, new URL(`https://${host}/`), nowMs)),
+  );
+}
+
 export function isAuthorizedQwenCloudRequestUrl(url: URL): boolean {
   if (url.protocol !== "https:") return false;
   return (QWENCLOUD_REQUEST_HOSTS as readonly string[]).includes(url.hostname);

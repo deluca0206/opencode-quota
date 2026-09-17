@@ -195,6 +195,7 @@ describe("QwenCloud API client", () => {
     expect(result).toEqual({
       success: false,
       error: "QwenCloud host override is not allowed.",
+      reason: "invalid",
     });
     expect(JSON.stringify(result)).not.toContain(TICKET);
   });
@@ -232,6 +233,9 @@ describe("QwenCloud API client", () => {
       success: false,
       error: "QwenCloud request timed out.",
       retryable: true,
+      // A timeout says nothing about the session, so it must not be treated as
+      // an expired login.
+      reason: "transport",
     });
   });
 

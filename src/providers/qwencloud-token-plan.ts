@@ -18,6 +18,9 @@ import {
 } from "../lib/qwencloud-api.js";
 import {
   DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
+  markQwenCloudSessionRejected,
+  markQwenCloudSessionValidated,
+  type QwenCloudAuthDiagnostics,
   resolveQwenCloudAuthCached,
   resolveQwenCloudAuthWithDiagnostics,
 } from "../lib/qwencloud-auth.js";
@@ -44,6 +47,15 @@ const QUOTA_ACCOUNTING: AccountingMetadata = {
 
 const CREDIT_UNIT = { kind: "count", unit: "credit" } as const;
 
+/**
+ * Browser profiles one refresh may validate against the console.
+ *
+ * A rejected session fails fast (the console answers before any quota window is
+ * fetched), so trying a couple of profiles costs little; the bound keeps a
+ * machine full of expired logins from turning one refresh into a sweep.
+ */
+const MAX_SESSION_CANDIDATES_PER_REFRESH = 3;
+
 export const qwenCloudTokenPlanProvider: QuotaProvider = {
   id: "qwencloud-token-plan",
 
@@ -64,40 +76,57 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
-    const { auth, diagnostics } = await resolveQwenCloudAuthWithDiagnostics({
-      maxAgeMs: DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
-    });
     const activation = await resolveQwenCloudActivation(ctx);
-    const statusDetails = statusDetailsFromRecord({
-      auth_state: diagnostics.state,
-      auth_source: diagnostics.source ?? "(none)",
-      activation: activation.source ?? "(none)",
-      browsers_inspected:
-        diagnostics.browsers.length > 0 ? diagnostics.browsers.join(", ") : "(none)",
-      auth_note: diagnostics.note ?? undefined,
-      auth_error: diagnostics.error ?? undefined,
+    let { auth, diagnostics } = await resolveQwenCloudAuthWithDiagnostics({
+      maxAgeMs: DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
     });
 
     if (auth.state === "none") {
       if (!activation.activated) {
-        return withStatusDetails(notAttemptedResult(), statusDetails);
+        return withStatusDetails(notAttemptedResult(), buildStatusDetails(diagnostics, activation));
       }
       return withStatusDetails(
         attemptedErrorResult(QWENCLOUD_LABEL, QWENCLOUD_SETUP_HINT),
-        statusDetails,
+        buildStatusDetails(diagnostics, activation),
       );
     }
     if (auth.state === "invalid") {
-      return withStatusDetails(attemptedErrorResult(QWENCLOUD_LABEL, auth.error), statusDetails);
+      return withStatusDetails(
+        attemptedErrorResult(QWENCLOUD_LABEL, auth.error),
+        buildStatusDetails(diagnostics, activation),
+      );
     }
 
-    const result = await queryQwenCloudTokenPlan({
-      session: auth.session,
+    const queryOptions = {
       requestTimeoutMs: ctx.config?.requestTimeoutMsConfigured
         ? ctx.config.requestTimeoutMs
         : undefined,
       totalBudgetMs: QWENCLOUD_TOTAL_BUDGET_MS,
-    });
+    };
+
+    // The quota call is also the session check: a profile whose login the console
+    // rejects is dropped and the next browser or profile is tried.
+    let result = await queryQwenCloudTokenPlan({ session: auth.session, ...queryOptions });
+    for (
+      let attempt = 1;
+      !result.success &&
+      result.reason === "login_required" &&
+      attempt < MAX_SESSION_CANDIDATES_PER_REFRESH;
+      attempt += 1
+    ) {
+      const rejectedPath = auth.storePath;
+      markQwenCloudSessionRejected(auth.source);
+      const next = await resolveQwenCloudAuthWithDiagnostics({
+        maxAgeMs: DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
+      });
+      if (next.auth.state !== "configured") break;
+      if (!rejectedPath || next.auth.storePath === rejectedPath) break;
+      auth = next.auth;
+      diagnostics = next.diagnostics;
+      result = await queryQwenCloudTokenPlan({ session: auth.session, ...queryOptions });
+    }
+
+    const statusDetails = buildStatusDetails(diagnostics, activation);
     if (!result.success) {
       return withStatusDetails(
         attemptedErrorResult(QWENCLOUD_LABEL, result.error, {
@@ -112,6 +141,7 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
         ],
       );
     }
+    markQwenCloudSessionValidated(auth.source);
 
     const group = `${QWENCLOUD_LABEL} ${result.snapshot.planName}`.trim();
     const entries = buildWindowEntries(result.snapshot, group);
@@ -144,6 +174,42 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
     ]);
   },
 };
+
+function buildStatusDetails(
+  diagnostics: QwenCloudAuthDiagnostics,
+  activation: QwenCloudActivation,
+) {
+  return statusDetailsFromRecord({
+    auth_state: diagnostics.state,
+    auth_source: diagnostics.source ?? "(none)",
+    activation: activation.source ?? "(none)",
+    browsers_inspected:
+      diagnostics.browsers.length > 0 ? diagnostics.browsers.join(", ") : "(none)",
+    browser_session_report: formatInspections(diagnostics),
+    auth_note: diagnostics.note ?? undefined,
+    auth_error: diagnostics.error ?? undefined,
+  });
+}
+
+/**
+ * One line per inspected store, e.g. `google-chrome/Default: session (rows=102
+ * v11=102 schema=24 keyring=available)`. Carries no cookie name, value, or path.
+ */
+function formatInspections(diagnostics: QwenCloudAuthDiagnostics): string {
+  const inspections = diagnostics.inspections ?? [];
+  if (inspections.length === 0) return "(none)";
+  return inspections
+    .map((inspection) =>
+      [
+        `${inspection.browser}/${inspection.profile}:`,
+        inspection.outcome,
+        inspection.detail ? `(${inspection.detail})` : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    )
+    .join("; ");
+}
 
 /**
  * Activation is either a Qwen/Alibaba Token Plan credential registered in

@@ -453,32 +453,47 @@ Qwen/Alibaba Token Plan: Access https://home.qwencloud.com/billing/subscription/
 
 ### Console session
 
-No environment variable, companion CLI, or external command is required:
+No environment variable, companion CLI, external command, system package, browser flag, or exported cookie is required:
 
 1. Sign in at `https://home.qwencloud.com/billing/subscription/token-plan-individual` in the browser you already use.
-2. Run `/quota`. OpenCode Quota reads the session from your local browser profile.
+2. Run `/quota`. OpenCode Quota finds the browser, reads the session, validates it, and reports quota.
 
-On Linux these browsers are detected: Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, and Opera, including Flatpak and Snap installs. Every profile is considered, the most recently used cookie database is read first, and reading stops at the first login ticket. Databases are opened read-only, never copied, and only QwenCloud-related cookies from the default context are used.
+On Linux these browsers are detected: Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, and Opera — native, Flatpak, and Snap installs, release channels included. Every profile is considered, including profiles only named in the browser's own `Local State`, and reading stops at the first profile whose login the console hosts actually accept. Cookie databases are opened read-only and only QwenCloud-related cookies from the default context are used; the original database is never modified.
 
-Reading never waits long on a running browser. When the browser holds its cookie database or keeps a fresh login in its write-ahead log, the store is re-read through a private temporary copy (deleted immediately after use), so a sign-in performed with the browser open shows up within a few seconds — no browser restart. If even that fails, the last successfully read session is reused for up to ten minutes (marked as stale in `/quota_status`) and a fresh read retries within about thirty seconds.
+#### Keyring-protected Chromium cookies
 
-Optional overrides:
+Chrome, Chromium, Brave, and Edge encrypt cookie values with a password kept in the desktop keyring (`v11`). OpenCode Quota reads that password straight from the freedesktop Secret Service (`org.freedesktop.secrets`) over the session D-Bus, using a pure-JavaScript client installed with the package. Nothing extra has to be installed, and no helper binary is invoked.
+
+- GNOME Keyring and any other Secret Service implementation work as-is.
+- If the keyring is locked, the desktop shows its own standard unlock prompt once; dismissing it simply moves the sweep on to the next browser.
+- Passwords are held only in memory for the lifetime of the process, never logged, and never written to disk.
+- A KDE desktop that exposes Secret Service works too. KWallet-only setups without a Secret Service implementation are not covered yet, and Windows app-bound (`v20`) values are out of scope.
+
+#### Browser selection and fallback
+
+Stores are tried most recently written first, counting write-ahead-log and journal activity, and the profile whose session was last accepted by the console is tried first afterwards. A profile the console rejects is dropped and the next browser or profile is tried in the same refresh, bounded to a few candidates so one `/quota` never turns into a sweep of every profile. A missing or expired login in one browser therefore never hides a working login in another.
+
+Reading never waits long on a running browser: one open is bounded to 15 ms, a store that lost the race is not retried for ten seconds, and when the browser holds its cookie database or keeps a fresh login in an uncheckpointed write-ahead log, the store is re-read through a private temporary copy in a `0700` directory that is deleted as soon as the read finishes. A sign-in performed with the browser open shows up within a few seconds — no browser restart. If even that fails, the last successfully read session is reused for up to ten minutes (marked as stale in `/quota_status`) and a fresh read retries within about thirty seconds.
+
+#### Diagnostics
+
+`/quota_status` reports one value-free line per inspected store, for example:
+
+```
+browser_session_report: google-chrome/Default: no_ticket (rows=102 v11=102 schema=24 keyring=available); firefox/default-release: session
+```
+
+`rows` counts QwenCloud-domain cookies, `v10`/`v11`/`plain`/`other` count encryption formats, `schema` is the cookie database version, and `keyring` is the Secret Service outcome (`available`, `missing`, `locked`, `unavailable`, `error`, `not-configured`). Cookie names, values, keyring passwords, and file paths never appear.
+
+#### Optional overrides
 
 | Variable                     | Purpose                                                                     |
 | ---------------------------- | --------------------------------------------------------------------------- |
-| `QWEN_CLOUD_COOKIE`          | Use a copied `Cookie` header instead of any browser. Takes precedence.       |
 | `QWEN_CLOUD_BROWSER_PROFILE` | Pin one profile name or cookie database path when several profiles exist.    |
 | `QWEN_CLOUD_BROWSER=none`    | Disable all local browser reads.                                            |
+| `QWEN_CLOUD_COOKIE`          | Compatibility escape hatch: use a copied `Cookie` header instead of any browser. Takes precedence, and an invalid value blocks browser detection. |
 
-To copy a header manually:
-
-1. Sign in at `https://home.qwencloud.com/billing/subscription/token-plan-individual`.
-2. Open Developer Tools, then **Network**.
-3. Copy a request `Cookie` header from that page into `QWEN_CLOUD_COOKIE`.
-
-Do not put cookies in a repository or workspace config. A present invalid `QWEN_CLOUD_COOKIE` blocks browser detection. China/Team Alibaba consoles are out of scope.
-
-Chromium browsers that protect cookies with an OS keyring cannot be decrypted without a native secret-service binding, so they are skipped and `/quota_status` reports a keyring hint. Use a browser without keyring protection, or set `QWEN_CLOUD_COOKIE`.
+`QWEN_CLOUD_COOKIE` is not part of the normal flow and is only useful for debugging or for a browser this plugin cannot read. Do not put cookies in a repository or workspace config. China/Team Alibaba consoles are out of scope.
 
 The OpenCode provider IDs are `qwencloud-token-plan` and `alibaba-token-plan`. In manual provider mode, include canonical `qwencloud-token-plan` in `enabledProviders`.
 

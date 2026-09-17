@@ -11,7 +11,7 @@ import {
   readChromiumQwenCloudCookies,
 } from "./qwencloud-chromium.js";
 import type { QwenCloudCookie } from "./qwencloud-cookies.js";
-import { hasAuthTicket } from "./qwencloud-cookies.js";
+import { hasQwenCloudRequestTickets } from "./qwencloud-cookies.js";
 import {
   type FirefoxProfile,
   listFirefoxCookieStores,
@@ -192,8 +192,15 @@ export interface ImportBrowserSessionOptions {
   stores?: readonly BrowserCookieStore[];
   /** Keyring backend for `v11` values; defaults to the platform's own. */
   keyStore?: SystemKeyStore | null;
-  /** Try these stores before the recency order, e.g. the last valid session. */
-  preferredStores?: readonly BrowserCookieStore[];
+  /** Cookie database paths to try before the recency order, e.g. the last valid session. */
+  preferredStorePaths?: readonly string[];
+  /**
+   * Cookie database paths whose session QwenCloud already rejected.
+   *
+   * Exclusion never empties the candidate list: once every store has been
+   * rejected the sweep starts over instead of dead-ending.
+   */
+  excludeStorePaths?: readonly string[];
 }
 
 /**
@@ -217,21 +224,26 @@ export async function importBrowserQwenCloudSession(
   const keyStore =
     params?.keyStore === null ? undefined : (params?.keyStore ?? resolveSystemKeyStore());
   const ordered = orderPreferredFirst(
-    params?.preferredStores ?? [],
-    await orderStoresByRecency(stores),
+    params?.preferredStorePaths ?? [],
+    withoutExcludedStores(await orderStoresByRecency(stores), params?.excludeStorePaths ?? []),
   );
+
+  // A ticket the console hosts would not receive is not a session: such a store
+  // is passed over so a browser with a usable login wins.
+  const isUsableSession = (cookies: readonly QwenCloudCookie[]): boolean =>
+    hasQwenCloudRequestTickets(cookies, nowMs);
 
   const inspections: BrowserStoreInspection[] = [];
   let keyringSeen = false;
   let unreadable = false;
 
   for (const store of ordered) {
-    const result = await readBrowserCookieStore(store, nowMs, keyStore);
+    const result = await readBrowserCookieStore(store, nowMs, keyStore, isUsableSession);
     inspections.push(result.inspection);
     switch (result.read.state) {
       case "imported": {
         if (result.read.keyringProtected) keyringSeen = true;
-        if (hasAuthTicket(result.read.cookies)) {
+        if (isUsableSession(result.read.cookies)) {
           return {
             state: "imported",
             store,
@@ -276,7 +288,8 @@ interface StoreReadOutcome {
 async function readBrowserCookieStore(
   store: BrowserCookieStore,
   nowMs: number,
-  keyStore?: SystemKeyStore,
+  keyStore: SystemKeyStore | undefined,
+  isUsableSession: (cookies: readonly QwenCloudCookie[]) => boolean,
 ): Promise<StoreReadOutcome> {
   const options: OpenBrowserStoreOptions & { keyStore?: SystemKeyStore } = keyStore
     ? { keyStore }
@@ -309,26 +322,28 @@ async function readBrowserCookieStore(
     // An immutable snapshot or a busy-locked browser can hide a login that only
     // exists in the write-ahead log: retry once through a copied snapshot.
     const missingTicket =
-      (first.state === "imported" && !hasAuthTicket(first.cookies)) || first.state === "no_session";
+      (first.state === "imported" && !isUsableSession(first.cookies)) ||
+      first.state === "no_session";
     if (missingTicket && (await hasNonEmptyCompanionWal(store.dbPath))) {
       const second = await readDirect({ preferSnapshotCopy: true });
-      if (second.state === "imported" && hasAuthTicket(second.cookies)) {
-        return { read: second, inspection: inspectStore(store, second) };
+      if (second.state === "imported" && isUsableSession(second.cookies)) {
+        return { read: second, inspection: inspectStore(store, second, isUsableSession) };
       }
       if (second.state !== "unreadable") {
-        return { read: first, inspection: inspectStore(store, first) };
+        return { read: first, inspection: inspectStore(store, first, isUsableSession) };
       }
     }
-    return { read: first, inspection: inspectStore(store, first) };
+    return { read: first, inspection: inspectStore(store, first, isUsableSession) };
   } catch {
     const read: BrowserStoreReadResult = { state: "unreadable" };
-    return { read, inspection: inspectStore(store, read) };
+    return { read, inspection: inspectStore(store, read, isUsableSession) };
   }
 }
 
 function inspectStore(
   store: BrowserCookieStore,
   read: BrowserStoreReadResult,
+  isUsableSession: (cookies: readonly QwenCloudCookie[]) => boolean,
 ): BrowserStoreInspection {
   const base = { browser: store.browser, profile: store.profile };
   const detail = summarizeRead(read.summary);
@@ -336,7 +351,7 @@ function inspectStore(
     case "imported":
       return {
         ...base,
-        outcome: hasAuthTicket(read.cookies) ? "session" : "no_ticket",
+        outcome: isUsableSession(read.cookies) ? "session" : "no_ticket",
         ...(detail ? { detail } : {}),
       };
     case "keyring":
@@ -373,14 +388,24 @@ export function summarizeRead(summary: BrowserStoreReadSummary | undefined): str
 }
 
 function orderPreferredFirst(
-  preferred: readonly BrowserCookieStore[],
+  preferredPaths: readonly string[],
   ordered: readonly BrowserCookieStore[],
 ): BrowserCookieStore[] {
-  if (preferred.length === 0) return [...ordered];
-  const preferredPaths = new Set(preferred.map((store) => store.dbPath));
-  const first = ordered.filter((store) => preferredPaths.has(store.dbPath));
-  const rest = ordered.filter((store) => !preferredPaths.has(store.dbPath));
+  if (preferredPaths.length === 0) return [...ordered];
+  const preferred = new Set(preferredPaths);
+  const first = ordered.filter((store) => preferred.has(store.dbPath));
+  const rest = ordered.filter((store) => !preferred.has(store.dbPath));
   return [...first, ...rest];
+}
+
+function withoutExcludedStores(
+  ordered: readonly BrowserCookieStore[],
+  excludedPaths: readonly string[],
+): BrowserCookieStore[] {
+  if (excludedPaths.length === 0) return [...ordered];
+  const excluded = new Set(excludedPaths);
+  const remaining = ordered.filter((store) => !excluded.has(store.dbPath));
+  return remaining.length > 0 ? remaining : [...ordered];
 }
 
 /**

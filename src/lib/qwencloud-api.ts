@@ -51,7 +51,16 @@ const QWENCLOUD_USER_AGENT =
 
 export type QwenCloudQueryResult =
   | { success: true; snapshot: QwenCloudUsageSnapshot; secTokenSource: string }
-  | { success: false; error: string; retryable?: boolean };
+  | { success: false; error: string; retryable?: boolean; reason?: QwenCloudFailureReason };
+
+/**
+ * Why a refresh failed.
+ *
+ * `login_required` means this session is not authenticated, so the caller may
+ * move on to another browser profile. `transport` means the console could not be
+ * reached, which says nothing about the session and must not discard it.
+ */
+export type QwenCloudFailureReason = "login_required" | "transport" | "invalid";
 
 type TransportFailureReason =
   | "login_required"
@@ -110,6 +119,7 @@ export async function queryQwenCloudTokenPlan(params: {
     return {
       success: false,
       error: "QwenCloud login required. Sign in at home.qwencloud.com and retry.",
+      reason: "login_required",
     };
   }
   const secrets = getCookieSecrets([...apiCookies, ...dashboardCookies, ...userInfoCookies]);
@@ -206,6 +216,12 @@ export async function queryQwenCloudTokenPlan(params: {
               success: false,
               error: error.message,
               retryable: error.reason === "unavailable",
+              reason:
+                error.reason === "login_required"
+                  ? "login_required"
+                  : error.reason === "unavailable"
+                    ? "transport"
+                    : "invalid",
             },
           };
         }
@@ -215,6 +231,7 @@ export async function queryQwenCloudTokenPlan(params: {
           result: {
             success: false,
             error: "QwenCloud response did not match the expected schema.",
+            reason: "invalid",
           },
         };
       }
@@ -241,6 +258,7 @@ export async function queryQwenCloudTokenPlan(params: {
       success: false,
       error: sanitizeVisibleError(error, secrets),
       retryable: isRetryableError(error),
+      reason: "transport",
     };
   }
 }
@@ -651,7 +669,11 @@ function unauthorizedOriginResult(origins: {
       new URL(origins.dashboardUrl),
     ];
     if (urls.some((url) => !isAuthorizedQwenCloudRequestUrl(url))) {
-      return { success: false, error: "QwenCloud host override is not allowed." };
+      return {
+        success: false,
+        error: "QwenCloud host override is not allowed.",
+        reason: "invalid",
+      };
     }
   } catch {
     return { success: false, error: "QwenCloud host override is not allowed." };
@@ -663,20 +685,41 @@ function transportFailureResult(reason: TransportFailureReason): {
   success: false;
   error: string;
   retryable?: boolean;
+  reason: QwenCloudFailureReason;
 } {
   switch (reason) {
     case "timeout":
-      return { success: false, error: "QwenCloud request timed out.", retryable: true };
+      return {
+        success: false,
+        error: "QwenCloud request timed out.",
+        retryable: true,
+        reason: "transport",
+      };
     case "rate_limited":
-      return { success: false, error: "QwenCloud rate limit reached.", retryable: true };
+      return {
+        success: false,
+        error: "QwenCloud rate limit reached.",
+        retryable: true,
+        reason: "transport",
+      };
     case "unavailable":
-      return { success: false, error: "QwenCloud API is unavailable.", retryable: true };
+      return {
+        success: false,
+        error: "QwenCloud API is unavailable.",
+        retryable: true,
+        reason: "transport",
+      };
     case "invalid":
-      return { success: false, error: "QwenCloud response did not match the expected schema." };
+      return {
+        success: false,
+        error: "QwenCloud response did not match the expected schema.",
+        reason: "invalid",
+      };
     default:
       return {
         success: false,
         error: "QwenCloud login required. Sign in at home.qwencloud.com and retry.",
+        reason: "login_required",
       };
   }
 }

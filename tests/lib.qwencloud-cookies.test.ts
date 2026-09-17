@@ -5,6 +5,7 @@ import {
   cookieMatchesHost,
   cookiesForUrl,
   hasAuthTicket,
+  hasQwenCloudRequestTickets,
   parseCookieHeader,
   sanitizeQwenCloudError,
 } from "../src/lib/qwencloud-cookies.js";
@@ -129,5 +130,82 @@ describe("QwenCloud cookies", () => {
     expect(sanitizeQwenCloudError(new Error("boom ticket-secret boom"), ["ticket-secret"])).toBe(
       "boom [redacted] boom",
     );
+  });
+});
+
+describe("QwenCloud request ticket applicability", () => {
+  const NOW_MS = 1_700_000_000_000;
+
+  it("accepts a ticket scoped to the QwenCloud hosts", () => {
+    expect(
+      hasQwenCloudRequestTickets(
+        [{ name: "login_qwencloud_ticket", value: "secret", host: ".qwencloud.com" }],
+        NOW_MS,
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a ticket from a parsed header, which carries no host", () => {
+    const cookies = parseCookieHeader("login_aliyunid_ticket=secret; cna=anon");
+    expect(hasQwenCloudRequestTickets(cookies ?? [], NOW_MS)).toBe(true);
+  });
+
+  it("rejects a ticket that only applies to another Alibaba host", () => {
+    expect(
+      hasQwenCloudRequestTickets(
+        [
+          { name: "login_aliyunid_ticket", value: "secret", host: ".aliyun.com" },
+          { name: "cna", value: "anon", host: ".qwencloud.com" },
+        ],
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects an expired ticket and a non-default Firefox container", () => {
+    expect(
+      hasQwenCloudRequestTickets(
+        [
+          {
+            name: "login_qwencloud_ticket",
+            value: "secret",
+            host: ".qwencloud.com",
+            expiry: Math.floor(NOW_MS / 1000) - 60,
+          },
+        ],
+        NOW_MS,
+      ),
+    ).toBe(false);
+    expect(
+      hasQwenCloudRequestTickets(
+        [
+          {
+            name: "login_qwencloud_ticket",
+            value: "secret",
+            host: ".qwencloud.com",
+            originAttributes: "^userContextId=2",
+          },
+        ],
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it("requires a ticket for every console host the API uses", () => {
+    expect(
+      hasQwenCloudRequestTickets(
+        [{ name: "login_qwencloud_ticket", value: "secret", host: "home.qwencloud.com" }],
+        NOW_MS,
+      ),
+    ).toBe(false);
+    expect(
+      hasQwenCloudRequestTickets(
+        [
+          { name: "login_qwencloud_ticket", value: "secret", host: "home.qwencloud.com" },
+          { name: "login_aliyunid_ticket", value: "secret", host: ".qwencloud.com" },
+        ],
+        NOW_MS,
+      ),
+    ).toBe(true);
   });
 });

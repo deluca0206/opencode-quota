@@ -1,6 +1,7 @@
 import {
   type BrowserCookieStore,
   type BrowserSessionImportResult,
+  type BrowserStoreInspection,
   browserStoresSignature,
   discoverBrowserCookieStores,
   fingerprintBrowserCookieStores,
@@ -62,7 +63,14 @@ export interface QwenCloudSession {
 
 export type ResolvedQwenCloudAuth =
   | { state: "none"; note?: string }
-  | { state: "configured"; session: QwenCloudSession; source: string; note?: string }
+  | {
+      state: "configured";
+      session: QwenCloudSession;
+      source: string;
+      note?: string;
+      /** Cookie database the session came from; never a cookie or key value. */
+      storePath?: string;
+    }
   | { state: "invalid"; source: string; error: string };
 
 export interface QwenCloudAuthDiagnostics {
@@ -72,7 +80,12 @@ export interface QwenCloudAuthDiagnostics {
   note: string | null;
   /** Browser/profile labels inspected. Never contains cookie names or values. */
   browsers: string[];
+  /** Per-store outcomes, bounded and free of cookie names, values, and paths. */
+  inspections: BrowserStoreInspection[];
 }
+
+/** How many store inspections a single diagnostics report may carry. */
+export const QWENCLOUD_MAX_REPORTED_INSPECTIONS = 8;
 
 export function resolveQwenCloudAuthFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -97,6 +110,8 @@ interface AuthCacheEntry {
   auth: ResolvedQwenCloudAuth;
   signature: string | null;
   browsers: string[];
+  inspections: BrowserStoreInspection[];
+  storePath: string | null;
   at: number;
 }
 
@@ -109,6 +124,17 @@ let lastGoodSession: {
   at: number;
 } | null = null;
 
+/**
+ * Stores whose session QwenCloud itself rejected.
+ *
+ * Finding a login ticket only proves the browser has one; the console decides
+ * whether it still authenticates. Rejected stores are skipped on later sweeps so
+ * an expired profile cannot shadow a valid one, and the sweep restarts once every
+ * store has been rejected.
+ */
+const rejectedStorePaths = new Set<string>();
+let lastValidatedStorePath: string | null = null;
+
 async function resolveAuthEntry(params?: {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
@@ -120,7 +146,14 @@ async function resolveAuthEntry(params?: {
 
   const fromEnv = resolveQwenCloudAuthFromEnv(env);
   if (fromEnv) {
-    return { auth: fromEnv, signature: null, browsers: [], at: now };
+    return {
+      auth: fromEnv,
+      signature: null,
+      browsers: [],
+      inspections: [],
+      storePath: null,
+      at: now,
+    };
   }
 
   if (isBrowserImportDisabled(env)) {
@@ -128,6 +161,8 @@ async function resolveAuthEntry(params?: {
       auth: { state: "none", note: "browser import disabled" },
       signature: null,
       browsers: [],
+      inspections: [],
+      storePath: null,
       at: now,
     };
   }
@@ -150,20 +185,18 @@ async function resolveAuthEntry(params?: {
   }
 
   lastImportAt = now;
-  let imported = await importBrowserQwenCloudSession({
+  const sweep = {
     env,
     homeDir: params?.homeDir,
     nowMs: now,
     stores,
-  });
+    preferredStorePaths: lastValidatedStorePath ? [lastValidatedStorePath] : [],
+    excludeStorePaths: [...rejectedStorePaths],
+  };
+  let imported = await importBrowserQwenCloudSession(sweep);
   if (imported.state === "unreadable") {
     // A torn snapshot read is transient; retry once before degrading.
-    imported = await importBrowserQwenCloudSession({
-      env,
-      homeDir: params?.homeDir,
-      nowMs: now,
-      stores,
-    });
+    imported = await importBrowserQwenCloudSession(sweep);
   }
 
   const browsers = uniqueBrowserLabels(inspectedStores(imported, stores));
@@ -185,6 +218,8 @@ async function resolveAuthEntry(params?: {
     auth,
     signature,
     browsers,
+    inspections: importInspections(imported).slice(0, QWENCLOUD_MAX_REPORTED_INSPECTIONS),
+    storePath: auth.state === "configured" ? (auth.storePath ?? null) : null,
     at: now,
   };
   cachedEntry = entry;
@@ -196,6 +231,9 @@ function shouldServeLastGoodSession(
   now: number,
 ): boolean {
   if (now - lastGood.at > QWENCLOUD_LAST_GOOD_SESSION_MAX_AGE_MS) return false;
+  // A session the console rejected must not be served again while the browser is
+  // merely busy.
+  if (lastGood.auth.storePath && rejectedStorePaths.has(lastGood.auth.storePath)) return false;
   return qwenCloudSessionTicketValidAt(lastGood.auth.session, now);
 }
 
@@ -210,6 +248,12 @@ function qwenCloudSessionTicketValidAt(session: QwenCloudSession, nowMs: number)
     const deadlineMs = cookieExpiryDeadlineMs(cookie.expiry);
     return deadlineMs === undefined || deadlineMs > nowMs;
   });
+}
+
+/** Inspections a sweep reported; absent on results produced before they existed. */
+function importInspections(imported: BrowserSessionImportResult): BrowserStoreInspection[] {
+  if ("inspections" in imported && Array.isArray(imported.inspections)) return imported.inspections;
+  return [];
 }
 
 function inspectedStores(
@@ -236,6 +280,7 @@ function toResolvedAuth(imported: BrowserSessionImportResult): ResolvedQwenCloud
       return {
         state: "configured",
         source: `browser:${imported.store.browser}/${imported.store.profile}`,
+        storePath: imported.store.dbPath,
         session: {
           dashboardCookies: imported.cookies,
           apiCookies: imported.cookies,
@@ -249,7 +294,7 @@ function toResolvedAuth(imported: BrowserSessionImportResult): ResolvedQwenCloud
       return {
         state: "none",
         note: imported.keyringSeen
-          ? "no readable QwenCloud ticket; some browser cookies are OS-keyring protected, set QWEN_CLOUD_COOKIE"
+          ? "no readable QwenCloud ticket; a browser cookie store is keyring protected and its keyring is locked or unavailable"
           : "no QwenCloud login ticket in local browsers",
       };
     case "unreadable":
@@ -314,7 +359,52 @@ export function toQwenCloudAuthDiagnostics(entry: AuthCacheEntry): QwenCloudAuth
     error: "error" in resolved ? resolved.error : null,
     note: "note" in resolved ? (resolved.note ?? null) : null,
     browsers: entry.browsers,
+    inspections: entry.inspections,
   };
+}
+
+/**
+ * Record that QwenCloud accepted the session this process resolved last.
+ *
+ * Its store is tried first on the next sweep and is no longer considered
+ * rejected.
+ */
+export function markQwenCloudSessionValidated(source?: string | null): void {
+  const entry = cachedEntry;
+  if (!entry || entry.storePath === null) return;
+  if (source !== undefined && source !== null && entry.auth.state === "configured") {
+    if (entry.auth.source !== source) return;
+  }
+  rejectedStorePaths.delete(entry.storePath);
+  lastValidatedStorePath = entry.storePath;
+}
+
+/**
+ * Record that QwenCloud rejected the session this process resolved last.
+ *
+ * The cached auth entry and any stale copy of that session are dropped so the
+ * next resolution continues the sweep with a different browser or profile.
+ */
+export function markQwenCloudSessionRejected(source?: string | null): void {
+  const entry = cachedEntry;
+  if (!entry || entry.storePath === null) return;
+  if (
+    source !== undefined &&
+    source !== null &&
+    entry.auth.state === "configured" &&
+    entry.auth.source !== source
+  ) {
+    return;
+  }
+  rejectedStorePaths.add(entry.storePath);
+  if (lastValidatedStorePath === entry.storePath) lastValidatedStorePath = null;
+  if (lastGoodSession?.auth.storePath === entry.storePath) lastGoodSession = null;
+  cachedEntry = null;
+}
+
+/** Store paths QwenCloud rejected; exposed for status reporting, never values. */
+export function qwenCloudRejectedStorePaths(): string[] {
+  return [...rejectedStorePaths];
 }
 
 export async function getQwenCloudAuthDiagnostics(params?: {
@@ -355,4 +445,6 @@ export function clearQwenCloudAuthCacheForTests(): void {
   cachedDiscovery = null;
   lastImportAt = 0;
   lastGoodSession = null;
+  rejectedStorePaths.clear();
+  lastValidatedStorePath = null;
 }

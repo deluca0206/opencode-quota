@@ -31,6 +31,11 @@ import {
 const tempRoots: string[] = [];
 const NOW_MS = 1_700_000_000_000;
 const TICKET = [{ name: "login_qwencloud_ticket", value: "secret", host: ".qwencloud.com" }];
+/** A valid Alibaba login ticket that the QwenCloud console hosts never receive. */
+const OTHER_HOST_TICKET = [
+  { name: "login_aliyunid_ticket", value: "secret", host: ".aliyun.com" },
+  { name: "cna", value: "anon", host: ".qwencloud.com" },
+];
 
 function firefoxStore(name: string, path: string) {
   return { name, path, isDefault: false };
@@ -474,7 +479,7 @@ describe("QwenCloud browser session orchestrator", () => {
       env: {},
       nowMs: NOW_MS,
       stores,
-      preferredStores: [stores[1]],
+      preferredStorePaths: [secondPath],
     });
     expect(result.state).toBe("imported");
     if (result.state !== "imported") return;
@@ -541,6 +546,90 @@ describe("QwenCloud browser session orchestrator", () => {
     ).toBe("rows=102 v11=100 v10=2 schema=24 keyring=available");
     expect(summarizeRead({ rows: 0, protections: {} })).toBe("rows=0");
     expect(summarizeRead(undefined)).toBeUndefined();
+  });
+
+  it("skips stores whose session QwenCloud already rejected", async () => {
+    const dir = await createTempDir();
+    const rejectedPath = join(dir, "rejected.sqlite");
+    const validPath = join(dir, "valid.sqlite");
+    await writeFile(rejectedPath, "rejected");
+    await writeFile(validPath, "valid");
+    const nowSeconds = Date.now() / 1000;
+    await utimes(rejectedPath, new Date(nowSeconds), new Date(nowSeconds));
+    await utimes(validPath, new Date(nowSeconds - 600), new Date(nowSeconds - 600));
+
+    backendMocks.readFirefoxCookieDatabase.mockResolvedValue(TICKET);
+
+    const result = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      stores: [
+        { kind: "firefox" as const, browser: "firefox", profile: "rejected", dbPath: rejectedPath },
+        { kind: "firefox" as const, browser: "firefox", profile: "valid", dbPath: validPath },
+      ],
+      excludeStorePaths: [rejectedPath],
+    });
+    expect(result.state).toBe("imported");
+    if (result.state !== "imported") return;
+    expect(result.store.profile).toBe("valid");
+  });
+
+  it("starts the sweep over when every store has been rejected", async () => {
+    const dir = await createTempDir();
+    const onlyPath = join(dir, "only.sqlite");
+    await writeFile(onlyPath, "only");
+    backendMocks.readFirefoxCookieDatabase.mockResolvedValue(TICKET);
+
+    const result = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      stores: [{ kind: "firefox" as const, browser: "firefox", profile: "only", dbPath: onlyPath }],
+      excludeStorePaths: [onlyPath],
+    });
+    expect(result.state).toBe("imported");
+    expect(backendMocks.readFirefoxCookieDatabase).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes over a store whose ticket does not apply to the QwenCloud hosts", async () => {
+    const dir = await createTempDir();
+    const chromePath = join(dir, "Cookies");
+    const ffPath = join(dir, "ff.sqlite");
+    await writeFile(chromePath, "chrome");
+    await writeFile(ffPath, "ff");
+    const nowSeconds = Date.now() / 1000;
+    await utimes(chromePath, new Date(nowSeconds), new Date(nowSeconds));
+    await utimes(ffPath, new Date(nowSeconds - 600), new Date(nowSeconds - 600));
+
+    backendMocks.readChromiumQwenCloudCookies.mockResolvedValue({
+      state: "imported",
+      cookies: OTHER_HOST_TICKET,
+      keyringProtected: false,
+      summary: { rows: 2, protections: { keyring: 2 }, schemaVersion: 24, keyring: "available" },
+    });
+    backendMocks.readFirefoxCookieDatabase.mockResolvedValue(TICKET);
+
+    const result = await importBrowserQwenCloudSession({
+      env: {},
+      nowMs: NOW_MS,
+      stores: [
+        {
+          kind: "chromium" as const,
+          browser: "google-chrome",
+          profile: "Default",
+          dbPath: chromePath,
+          rootPath: dir,
+        },
+        { kind: "firefox" as const, browser: "firefox", profile: "p", dbPath: ffPath },
+      ],
+    });
+
+    expect(result.state).toBe("imported");
+    if (result.state !== "imported") return;
+    expect(result.store.browser).toBe("firefox");
+    const chromeInspection = result.inspections.find(
+      (inspection) => inspection.browser === "google-chrome",
+    );
+    expect(chromeInspection?.outcome).toBe("no_ticket");
   });
 
   it("creates no directories while discovering browsers", async () => {
