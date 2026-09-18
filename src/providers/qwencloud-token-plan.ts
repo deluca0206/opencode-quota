@@ -18,6 +18,7 @@ import {
 } from "../lib/qwencloud-api.js";
 import {
   DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
+  isQwenCloudBrowserReadingSupported,
   markQwenCloudSessionRejected,
   markQwenCloudSessionValidated,
   type QwenCloudAuthDiagnostics,
@@ -76,6 +77,9 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
       maxAgeMs: DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
     });
     if (auth.state === "configured" || auth.state === "invalid") return true;
+    // Browser session reading is Linux-only: without a cookie override there is
+    // no session to find elsewhere, so the provider stays silent.
+    if (!isQwenCloudBrowserReadingSupported()) return false;
     return (await resolveQwenCloudActivation(ctx)).activated;
   },
 
@@ -94,7 +98,7 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
     });
 
     if (auth.state === "none") {
-      if (!activation.activated) {
+      if (!activation.activated || !isQwenCloudBrowserReadingSupported()) {
         return withStatusDetails(notAttemptedResult(), buildStatusDetails(diagnostics, activation));
       }
       return withStatusDetails(
@@ -122,6 +126,15 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
     // The quota call is also the session check: a profile whose login the console
     // rejects is dropped and the next browser or profile is tried.
     let result = await queryQwenCloudTokenPlan({ session: auth.session, ...queryOptions });
+    // The rejection is recorded the moment the console answers — not when the
+    // sweep continues — so a chain ended by the candidate cap or the wall-clock
+    // budget still invalidates its last rejected session.
+    const markRejectedIfLoginRequired = (): void => {
+      if (!result.success && result.reason === "login_required" && auth.state === "configured") {
+        markQwenCloudSessionRejected(auth.source);
+      }
+    };
+    markRejectedIfLoginRequired();
     const triedStorePaths = new Set<string>(auth.storePath ? [auth.storePath] : []);
     for (
       let attempt = 1;
@@ -131,7 +144,6 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
       sweepRemainingMs() > 0;
       attempt += 1
     ) {
-      markQwenCloudSessionRejected(auth.source);
       const next = await resolveQwenCloudAuthWithDiagnostics({
         maxAgeMs: DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
       });
@@ -147,6 +159,7 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
         ...queryOptions,
         totalBudgetMs: Math.min(QWENCLOUD_TOTAL_BUDGET_MS, sweepRemainingMs()),
       });
+      markRejectedIfLoginRequired();
     }
 
     const statusDetails = buildStatusDetails(diagnostics, activation);

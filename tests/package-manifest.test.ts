@@ -147,7 +147,7 @@ describe("package manifest compatibility", () => {
 
     expect(packageManagerMatch).not.toBeNull();
     expect(Number(packageManagerMatch?.[1])).toBeGreaterThanOrEqual(11);
-    expect(pkg.engines?.node).toBe(">=22.0.0");
+    expect(pkg.engines?.node).toBe(">=22.12.0");
     expect(pkg.devDependencies?.typescript).toBe("7.0.2");
     expect(pkg.devDependencies?.yaml).toBe("^2.8.3");
   });

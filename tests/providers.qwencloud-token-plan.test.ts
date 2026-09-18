@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   queryQwenCloudTokenPlan: vi.fn(),
   isQwenCloudTokenPlanActivated: vi.fn(),
   qwenCloudSessionActivation: vi.fn(),
+  isQwenCloudBrowserReadingSupported: vi.fn(),
   markQwenCloudSessionRejected: vi.fn(),
   markQwenCloudSessionValidated: vi.fn(),
 }));
@@ -20,6 +21,7 @@ vi.mock("../src/lib/qwencloud-auth.js", () => ({
   DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS: 300_000,
   resolveQwenCloudAuthCached: mocks.resolveQwenCloudAuthCached,
   resolveQwenCloudAuthWithDiagnostics: mocks.resolveQwenCloudAuthWithDiagnostics,
+  isQwenCloudBrowserReadingSupported: mocks.isQwenCloudBrowserReadingSupported,
   markQwenCloudSessionRejected: mocks.markQwenCloudSessionRejected,
   markQwenCloudSessionValidated: mocks.markQwenCloudSessionValidated,
   qwenCloudSessionCookieHeader: vi.fn(),
@@ -86,6 +88,8 @@ describe("Qwen/Alibaba Token Plan provider", () => {
     setAuth({ state: "none", note: "no QwenCloud login ticket in local browsers" });
     mocks.isQwenCloudTokenPlanActivated.mockResolvedValue({ activated: false, source: null });
     mocks.qwenCloudSessionActivation.mockReturnValue(null);
+    mocks.isQwenCloudBrowserReadingSupported.mockReset();
+    mocks.isQwenCloudBrowserReadingSupported.mockReturnValue(true);
   });
 
   it("uses the canonical provider id", () => {
@@ -123,6 +127,17 @@ describe("Qwen/Alibaba Token Plan provider", () => {
   it("is unavailable when neither credential nor session matches", async () => {
     setAuth({ state: "none" });
     await expect(qwenCloudTokenPlanProvider.isAvailable(context())).resolves.toBe(false);
+  });
+
+  it("stays silent on platforms without browser session reading", async () => {
+    mocks.isQwenCloudBrowserReadingSupported.mockReturnValue(false);
+    setAuth({ state: "none", note: "browser session reading is Linux-only in this version" });
+    // A registered credential alone must not surface a setup error off Linux.
+    mocks.isQwenCloudTokenPlanActivated.mockResolvedValue({ activated: true, source: "auth.json" });
+
+    await expect(qwenCloudTokenPlanProvider.isAvailable(context())).resolves.toBe(false);
+    expectNotAttempted(await qwenCloudTokenPlanProvider.fetch(context()));
+    expect(mocks.queryQwenCloudTokenPlan).not.toHaveBeenCalled();
   });
 
   it("becomes available once a Token Plan credential is registered", async () => {
@@ -316,7 +331,12 @@ describe("Qwen/Alibaba Token Plan provider", () => {
     const result = await qwenCloudTokenPlanProvider.fetch(context());
     expect(result.attempted).toBe(true);
     expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(8);
-    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(7);
+    // The candidate cap ends the sweep, and the last rejected session is still
+    // invalidated rather than served again on the next refresh.
+    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(8);
+    expect(mocks.markQwenCloudSessionRejected).toHaveBeenLastCalledWith(
+      "browser:firefox/profile-7",
+    );
     expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
   });
 
@@ -341,6 +361,8 @@ describe("Qwen/Alibaba Token Plan provider", () => {
       const result = await qwenCloudTokenPlanProvider.fetch(context());
       expect(result.attempted).toBe(true);
       expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(2);
+      // The budget ends the sweep with the second session already invalidated.
+      expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(2);
       expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();

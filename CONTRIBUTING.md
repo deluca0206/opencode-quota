@@ -22,7 +22,7 @@ Thanks for contributing. This repo has strict local-only behavior and regression
 
 ## Development Setup
 
-- The published package runtime supports Node.js `>=22.0.0` (matches `package.json` engines).
+- The published package runtime supports Node.js `>=22.12.0` (matches `package.json` engines).
 - Repository development uses pnpm v11, which requires Node.js `>=22` for the pnpm CLI.
 - Enable the pinned package manager and install dependencies with:
 
@@ -59,7 +59,7 @@ PR and `main` pushes trigger `.github/workflows/ci.yml` (`CI` workflow):
 - Job: `pnpm-quality` on Node `24.x`
 - Steps: frozen install, `pnpm verify`, then one exact npm artifact pack and upload
 - Job: `runtime-smoke` on Node `22.x` and `24.x`
-- Runtime smoke installs that exact packed artifact as a consumer and verifies the default/server imports, TUI export payload, CLI help, and `engines.node >=22.0.0`
+- Runtime smoke installs that exact packed artifact as a consumer and verifies the default/server imports, TUI export payload, CLI help, and `engines.node >=22.12.0`
 
 Release workflow `.github/workflows/publish-npm.yml` first checks the release tag, SHA, and package version, then runs `pnpm verify` on Node 24. After that, it packs one exact artifact, smoke-tests that artifact on Node 22 and 24, verifies it again before provenance publishing, and backfills the release version. Run `pnpm run release:check` on Node 24 when the release environment is available; it adds the release-version assertion after the canonical gate.
 

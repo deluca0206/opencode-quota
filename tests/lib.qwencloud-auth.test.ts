@@ -39,6 +39,9 @@ function fingerprint(mtimeMs = 1_000, size = 10, path = STORE.dbPath) {
   return [{ path, mtimeMs, size }];
 }
 
+/** Browser-path cases pin the supported platform explicitly, so the suite is deterministic on every OS. */
+const LINUX = { platform: "linux" as const };
+
 describe("QwenCloud auth resolution", () => {
   beforeEach(async () => {
     vi.resetModules();
@@ -80,7 +83,7 @@ describe("QwenCloud auth resolution", () => {
       qwenCloudRejectedStorePaths,
     } = await loadAuth();
 
-    await resolveQwenCloudAuth({ nowMs: 1_000 });
+    await resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
       expect.objectContaining({ preferredStorePaths: [], excludeStorePaths: [] }),
     );
@@ -89,7 +92,7 @@ describe("QwenCloud auth resolution", () => {
     markQwenCloudSessionValidated("browser:firefox/default-release");
     // Past the re-import throttle, so a fingerprint change forces a new sweep.
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(10_000));
-    await resolveQwenCloudAuth({ nowMs: 10_000 });
+    await resolveQwenCloudAuth({ ...LINUX, nowMs: 10_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
       expect.objectContaining({ preferredStorePaths: [STORE.dbPath], excludeStorePaths: [] }),
     );
@@ -105,7 +108,9 @@ describe("QwenCloud auth resolution", () => {
       inspections: [{ browser: "firefox", profile: "default-release", outcome: "no_ticket" }],
     });
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(20_000));
-    await expect(resolveQwenCloudAuth({ nowMs: 20_000 })).resolves.toMatchObject({ state: "none" });
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 20_000 })).resolves.toMatchObject({
+      state: "none",
+    });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
       expect.objectContaining({ excludeStorePaths: [STORE.dbPath] }),
     );
@@ -120,7 +125,7 @@ describe("QwenCloud auth resolution", () => {
     });
     const { resolveQwenCloudAuth, markQwenCloudSessionRejected, qwenCloudRejectedStorePaths } =
       await loadAuth();
-    await resolveQwenCloudAuth({ nowMs: 1_000 });
+    await resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 });
     markQwenCloudSessionRejected("browser:google-chrome/Default");
     expect(qwenCloudRejectedStorePaths()).toEqual([]);
   });
@@ -141,7 +146,7 @@ describe("QwenCloud auth resolution", () => {
       ],
     });
     const { getQwenCloudAuthDiagnostics } = await loadAuth();
-    const diagnostics = await getQwenCloudAuthDiagnostics({ nowMs: 1_000 });
+    const diagnostics = await getQwenCloudAuthDiagnostics({ ...LINUX, nowMs: 1_000 });
     expect(diagnostics.inspections).toEqual([
       { browser: "firefox", profile: "default-release", outcome: "no_rows", detail: "rows=0" },
       {
@@ -168,14 +173,14 @@ describe("QwenCloud auth resolution", () => {
       })),
     });
     const { getQwenCloudAuthDiagnostics, QWENCLOUD_MAX_REPORTED_INSPECTIONS } = await loadAuth();
-    const diagnostics = await getQwenCloudAuthDiagnostics({ nowMs: 1_000 });
+    const diagnostics = await getQwenCloudAuthDiagnostics({ ...LINUX, nowMs: 1_000 });
     expect(diagnostics.inspections).toHaveLength(QWENCLOUD_MAX_REPORTED_INSPECTIONS);
   });
 
   it("prefers a valid environment cookie header without browser I/O", async () => {
     process.env.QWEN_CLOUD_COOKIE = "login_qwencloud_ticket=env-secret; cna=anon";
     const { resolveQwenCloudAuth } = await loadAuth();
-    const resolved = await resolveQwenCloudAuth({ nowMs: 1_000 });
+    const resolved = await resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 });
     expect(resolved).toMatchObject({ state: "configured", source: "env:QWEN_CLOUD_COOKIE" });
     expect(browserMocks.discoverBrowserCookieStores).not.toHaveBeenCalled();
     expect(browserMocks.importBrowserQwenCloudSession).not.toHaveBeenCalled();
@@ -184,7 +189,7 @@ describe("QwenCloud auth resolution", () => {
   it("treats an invalid environment cookie as blocking", async () => {
     process.env.QWEN_CLOUD_COOKIE = "cna=anon";
     const { resolveQwenCloudAuth } = await loadAuth();
-    await expect(resolveQwenCloudAuth({ nowMs: 1_000 })).resolves.toEqual({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 })).resolves.toEqual({
       state: "invalid",
       source: "env:QWEN_CLOUD_COOKIE",
       error: "QwenCloud cookie header is missing a login ticket",
@@ -198,7 +203,7 @@ describe("QwenCloud auth resolution", () => {
       cookies: [{ name: "login_qwencloud_ticket", value: "ff-secret", host: ".qwencloud.com" }],
     });
     const { resolveQwenCloudAuth } = await loadAuth();
-    const resolved = await resolveQwenCloudAuth({ nowMs: 1_000 });
+    const resolved = await resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 });
     expect(resolved).toMatchObject({
       state: "configured",
       source: "browser:firefox/default-release",
@@ -217,7 +222,7 @@ describe("QwenCloud auth resolution", () => {
       cookies: [{ name: "login_qwencloud_ticket", value: "chrome-secret" }],
     });
     const { resolveQwenCloudAuth } = await loadAuth();
-    await expect(resolveQwenCloudAuth({ nowMs: 1_000 })).resolves.toMatchObject({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 })).resolves.toMatchObject({
       state: "configured",
       source: "browser:google-chrome/Default",
     });
@@ -231,9 +236,9 @@ describe("QwenCloud auth resolution", () => {
     });
     const { resolveQwenCloudAuthCached, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
-    await resolveQwenCloudAuthCached({ nowMs: 1_000 });
-    await resolveQwenCloudAuthCached({ nowMs: 2_000 });
-    await resolveQwenCloudAuthCached({ nowMs: 3_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 2_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 3_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(1);
   });
 
@@ -245,9 +250,9 @@ describe("QwenCloud auth resolution", () => {
     });
     const { resolveQwenCloudAuthCached, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
-    await resolveQwenCloudAuthCached({ nowMs: 1_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 });
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(9_999));
-    await resolveQwenCloudAuthCached({ nowMs: 10_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 10_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(2);
   });
 
@@ -259,17 +264,17 @@ describe("QwenCloud auth resolution", () => {
     });
     const { resolveQwenCloudAuthCached, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
-    await resolveQwenCloudAuthCached({ nowMs: 1_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 });
     // Actively browsed: the fingerprint changes on every call inside the window.
     for (let i = 0; i < 10; i++) {
       browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(2_000 + i));
-      await resolveQwenCloudAuthCached({ nowMs: 1_100 + i * 50 });
+      await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_100 + i * 50 });
     }
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(1);
 
     // Past the minimum interval the change is picked up again.
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(9_000));
-    await resolveQwenCloudAuthCached({ nowMs: 9_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 9_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(2);
   });
 
@@ -289,9 +294,9 @@ describe("QwenCloud auth resolution", () => {
     const { resolveQwenCloudAuthCached, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
     const pending = [
-      resolveQwenCloudAuthCached({ nowMs: 1_000 }),
-      resolveQwenCloudAuthCached({ nowMs: 1_000 }),
-      resolveQwenCloudAuthCached({ nowMs: 1_000 }),
+      resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 }),
+      resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 }),
+      resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 }),
     ];
     await vi.waitFor(() => {
       expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(1);
@@ -311,7 +316,10 @@ describe("QwenCloud auth resolution", () => {
     const { resolveQwenCloudAuthWithDiagnostics, clearQwenCloudAuthCacheForTests } =
       await loadAuth();
     clearQwenCloudAuthCacheForTests();
-    const { auth, diagnostics } = await resolveQwenCloudAuthWithDiagnostics({ nowMs: 1_000 });
+    const { auth, diagnostics } = await resolveQwenCloudAuthWithDiagnostics({
+      ...LINUX,
+      nowMs: 1_000,
+    });
     expect(auth.state).toBe("configured");
     expect(diagnostics.browsers).toEqual(["firefox/default-release"]);
     expect(JSON.stringify(diagnostics)).not.toContain("ff-secret");
@@ -323,7 +331,7 @@ describe("QwenCloud auth resolution", () => {
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue([]);
     browserMocks.importBrowserQwenCloudSession.mockResolvedValue({ state: "no_stores" });
     const { resolveQwenCloudAuth } = await loadAuth();
-    await expect(resolveQwenCloudAuth({ nowMs: 1_000 })).resolves.toMatchObject({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 })).resolves.toMatchObject({
       state: "none",
     });
   });
@@ -335,7 +343,7 @@ describe("QwenCloud auth resolution", () => {
       keyringSeen: true,
     });
     const { getQwenCloudAuthDiagnostics } = await loadAuth();
-    const diagnostics = await getQwenCloudAuthDiagnostics({ nowMs: 1_000 });
+    const diagnostics = await getQwenCloudAuthDiagnostics({ ...LINUX, nowMs: 1_000 });
     expect(diagnostics.state).toBe("none");
     expect(diagnostics.error).toBeNull();
     expect(diagnostics.note).toMatch(/keyring/u);
@@ -344,9 +352,33 @@ describe("QwenCloud auth resolution", () => {
   it("honours an explicit browser import opt-out", async () => {
     process.env.QWEN_CLOUD_BROWSER = "none";
     const { resolveQwenCloudAuth } = await loadAuth();
-    await expect(resolveQwenCloudAuth({ nowMs: 1_000 })).resolves.toMatchObject({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 })).resolves.toMatchObject({
       state: "none",
       note: "browser import disabled",
+    });
+    expect(browserMocks.discoverBrowserCookieStores).not.toHaveBeenCalled();
+  });
+
+  it("does not discover browsers on platforms without session reading", async () => {
+    const { resolveQwenCloudAuthWithDiagnostics } = await loadAuth();
+    const { auth, diagnostics } = await resolveQwenCloudAuthWithDiagnostics({
+      platform: "darwin",
+      nowMs: 1_000,
+    });
+    expect(auth.state).toBe("none");
+    if (auth.state === "none") expect(auth.note).toMatch(/Linux-only/u);
+    expect(diagnostics.browsers).toEqual([]);
+    expect(diagnostics.inspections).toEqual([]);
+    expect(browserMocks.discoverBrowserCookieStores).not.toHaveBeenCalled();
+    expect(browserMocks.importBrowserQwenCloudSession).not.toHaveBeenCalled();
+  });
+
+  it("still honours the cookie override on platforms without session reading", async () => {
+    process.env.QWEN_CLOUD_COOKIE = "login_qwencloud_ticket=override-secret";
+    const { resolveQwenCloudAuth } = await loadAuth();
+    await expect(resolveQwenCloudAuth({ platform: "win32", nowMs: 1_000 })).resolves.toMatchObject({
+      state: "configured",
+      source: "env:QWEN_CLOUD_COOKIE",
     });
     expect(browserMocks.discoverBrowserCookieStores).not.toHaveBeenCalled();
   });
@@ -360,14 +392,14 @@ describe("QwenCloud auth resolution", () => {
     const { resolveQwenCloudAuthCached, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
 
-    await resolveQwenCloudAuthCached({ nowMs: 1_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 });
     // Same fingerprint, still inside the negative window: served from cache.
-    await resolveQwenCloudAuthCached({ nowMs: 20_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 20_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(1);
 
     // Past the short negative TTL the store is read again without waiting for a
     // fingerprint change or the full positive TTL.
-    await resolveQwenCloudAuthCached({ nowMs: 40_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 40_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(2);
   });
 
@@ -380,14 +412,14 @@ describe("QwenCloud auth resolution", () => {
     const { resolveQwenCloudAuthCached, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
 
-    await resolveQwenCloudAuthCached({ nowMs: 1_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 1_000 });
     expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
-    await resolveQwenCloudAuthCached({ nowMs: 20_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 20_000 });
     expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
 
     // Past the negative window the inventory is rebuilt too, so a profile created
     // after a failed sign-in is found without waiting out the positive window.
-    await resolveQwenCloudAuthCached({ nowMs: 40_000 });
+    await resolveQwenCloudAuthCached({ ...LINUX, nowMs: 40_000 });
     expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(2);
   });
 
@@ -401,16 +433,16 @@ describe("QwenCloud auth resolution", () => {
       await loadAuth();
     clearQwenCloudAuthCacheForTests();
 
-    await resolveQwenCloudAuth({ nowMs: 1_000 });
+    await resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 });
     expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
 
     // Inside the discovery window a positive inventory is reused.
-    await resolveQwenCloudAuth({ nowMs: 2_000 });
+    await resolveQwenCloudAuth({ ...LINUX, nowMs: 2_000 });
     expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
 
     markQwenCloudSessionRejected("browser:firefox/default-release");
     browserMocks.discoverBrowserCookieStores.mockResolvedValue([STORE, CHROMIUM_STORE]);
-    await resolveQwenCloudAuth({ nowMs: 3_000 });
+    await resolveQwenCloudAuth({ ...LINUX, nowMs: 3_000 });
     expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(2);
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
       expect.objectContaining({ excludeStorePaths: [STORE.dbPath] }),
@@ -424,7 +456,7 @@ describe("QwenCloud auth resolution", () => {
     });
     const { resolveQwenCloudAuth, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
-    await resolveQwenCloudAuth({ nowMs: 1_000 });
+    await resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 });
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(2);
   });
 
@@ -438,7 +470,7 @@ describe("QwenCloud auth resolution", () => {
       await loadAuth();
     clearQwenCloudAuthCacheForTests();
 
-    const first = await resolveQwenCloudAuthWithDiagnostics({ nowMs: 1_000 });
+    const first = await resolveQwenCloudAuthWithDiagnostics({ ...LINUX, nowMs: 1_000 });
     expect(first.auth.state).toBe("configured");
 
     // The browser got busy: every read now fails.
@@ -448,7 +480,7 @@ describe("QwenCloud auth resolution", () => {
     });
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(9_999));
 
-    const second = await resolveQwenCloudAuthWithDiagnostics({ nowMs: 10_000 });
+    const second = await resolveQwenCloudAuthWithDiagnostics({ ...LINUX, nowMs: 10_000 });
     expect(second.auth.state).toBe("configured");
     if (second.auth.state !== "configured") return;
     expect(second.auth.session.dashboardCookies[0]?.value).toBe("ff-secret");
@@ -465,7 +497,7 @@ describe("QwenCloud auth resolution", () => {
     const { resolveQwenCloudAuth, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
 
-    await expect(resolveQwenCloudAuth({ nowMs: 1_000 })).resolves.toMatchObject({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 })).resolves.toMatchObject({
       state: "configured",
     });
 
@@ -476,7 +508,7 @@ describe("QwenCloud auth resolution", () => {
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(9_999));
 
     // Ten minutes later the fallback is gone and the real state surfaces.
-    await expect(resolveQwenCloudAuth({ nowMs: 700_000 })).resolves.toMatchObject({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 700_000 })).resolves.toMatchObject({
       state: "none",
     });
   });
@@ -498,7 +530,7 @@ describe("QwenCloud auth resolution", () => {
     const { resolveQwenCloudAuth, clearQwenCloudAuthCacheForTests } = await loadAuth();
     clearQwenCloudAuthCacheForTests();
 
-    await expect(resolveQwenCloudAuth({ nowMs: 1_000 })).resolves.toMatchObject({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 1_000 })).resolves.toMatchObject({
       state: "configured",
     });
 
@@ -508,7 +540,7 @@ describe("QwenCloud auth resolution", () => {
     });
     browserMocks.fingerprintBrowserCookieStores.mockResolvedValue(fingerprint(9_999));
 
-    await expect(resolveQwenCloudAuth({ nowMs: 10_000 })).resolves.toMatchObject({
+    await expect(resolveQwenCloudAuth({ ...LINUX, nowMs: 10_000 })).resolves.toMatchObject({
       state: "none",
     });
   });

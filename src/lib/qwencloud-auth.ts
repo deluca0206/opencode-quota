@@ -20,6 +20,19 @@ import {
 export const QWEN_CLOUD_COOKIE_ENV = "QWEN_CLOUD_COOKIE";
 
 /**
+ * Whether browser cookie stores can be read on this platform.
+ *
+ * Browser discovery layouts and the Secret Service backend are Linux-only in
+ * this version; every other platform falls back to the `QWEN_CLOUD_COOKIE`
+ * override alone, so no browser directory is probed there.
+ */
+export function isQwenCloudBrowserReadingSupported(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "linux";
+}
+
+/**
  * Browser sessions are invalidated by a cookie-database fingerprint, so this TTL
  * only bounds how long a genuinely unchanged session may be reused. Keeping it
  * long avoids repeated SQLite opens on the availability hot path.
@@ -140,6 +153,7 @@ async function resolveAuthEntry(params?: {
   homeDir?: string;
   nowMs?: number;
   maxAgeMs?: number;
+  platform?: NodeJS.Platform;
 }): Promise<AuthCacheEntry> {
   const env = params?.env ?? process.env;
   const now = params?.nowMs ?? Date.now();
@@ -159,6 +173,17 @@ async function resolveAuthEntry(params?: {
   if (isBrowserImportDisabled(env)) {
     return {
       auth: { state: "none", note: "browser import disabled" },
+      signature: null,
+      browsers: [],
+      inspections: [],
+      storePath: null,
+      at: now,
+    };
+  }
+
+  if (!isQwenCloudBrowserReadingSupported(params?.platform)) {
+    return {
+      auth: { state: "none", note: "browser session reading is Linux-only in this version" },
       signature: null,
       browsers: [],
       inspections: [],
@@ -330,6 +355,7 @@ export async function resolveQwenCloudAuth(params?: {
   homeDir?: string;
   nowMs?: number;
   maxAgeMs?: number;
+  platform?: NodeJS.Platform;
 }): Promise<ResolvedQwenCloudAuth> {
   return (await resolveQwenCloudAuthEntry(params)).auth;
 }
@@ -339,6 +365,7 @@ async function resolveQwenCloudAuthEntry(params?: {
   homeDir?: string;
   nowMs?: number;
   maxAgeMs?: number;
+  platform?: NodeJS.Platform;
 }): Promise<AuthCacheEntry> {
   if (inFlight) return inFlight;
   const pending = resolveAuthEntry(params).finally(() => {
@@ -353,6 +380,7 @@ export async function resolveQwenCloudAuthCached(params?: {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
   nowMs?: number;
+  platform?: NodeJS.Platform;
 }): Promise<ResolvedQwenCloudAuth> {
   return resolveQwenCloudAuth(params);
 }
@@ -422,6 +450,7 @@ export async function getQwenCloudAuthDiagnostics(params?: {
   homeDir?: string;
   nowMs?: number;
   maxAgeMs?: number;
+  platform?: NodeJS.Platform;
 }): Promise<QwenCloudAuthDiagnostics> {
   return toQwenCloudAuthDiagnostics(await resolveQwenCloudAuthEntry(params));
 }
@@ -437,6 +466,7 @@ export async function resolveQwenCloudAuthWithDiagnostics(params?: {
   homeDir?: string;
   nowMs?: number;
   maxAgeMs?: number;
+  platform?: NodeJS.Platform;
 }): Promise<{ auth: ResolvedQwenCloudAuth; diagnostics: QwenCloudAuthDiagnostics }> {
   const entry = await resolveQwenCloudAuthEntry(params);
   return { auth: entry.auth, diagnostics: toQwenCloudAuthDiagnostics(entry) };

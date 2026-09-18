@@ -79,7 +79,7 @@ try {
     const pkg = JSON.parse(
       await readFile("node_modules/@slkiser/opencode-quota/package.json", "utf8"),
     );
-    assert.equal(pkg.engines?.node, ">=22.0.0");
+    assert.equal(pkg.engines?.node, ">=22.12.0");
     assert.equal(pkg.dependencies?.["@opentelemetry/api"], "^1.9.1");
     for (const dependencyType of ["devDependencies", "optionalDependencies", "peerDependencies"]) {
       assert.equal(pkg[dependencyType]?.["@opentelemetry/api"], undefined);

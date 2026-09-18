@@ -23,7 +23,7 @@ const configuration = await readFile(
 
 describe("v4 migration documentation contract", () => {
   it("keeps requirements and navigation aligned", () => {
-    expect(packageJson.engines?.node).toBe(">=22.0.0");
+    expect(packageJson.engines?.node).toBe(">=22.12.0");
     expect(packageJson.peerDependencies?.["@opencode-ai/plugin"]).toBe("^1.4.3");
     expect(packageJson.engines).not.toHaveProperty("opencode");
 
