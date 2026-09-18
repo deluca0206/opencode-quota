@@ -242,9 +242,10 @@ Run `/quota_status` and check the `qwencloud_token_plan` section. Diagnostics sh
 | Just signed in with the browser open | The store is read again through a private temporary copy within a few seconds; no browser restart is needed. |
 | Quota marked as last known session  | The browser is holding its cookie database. The last successfully read session is reused for up to ten minutes and a fresh read retries within about thirty seconds. |
 | Wrong browser or profile used       | The most recently used profile is read first. Pin one with `QWEN_CLOUD_BROWSER_PROFILE`.                |
-| `keyring=locked` in the report      | The desktop keyring is locked. Accept the standard unlock prompt, or unlock your keyring, and run `/quota` again. |
+| `keyring=locked` in the report      | The desktop keyring is locked. Accept the standard unlock prompt — one dialog covers every browser, and only one is shown per minute — or unlock your keyring, then run `/quota` again. |
 | `keyring=unavailable` or `error`    | No Secret Service implementation answered on the session D-Bus (headless session, or a KWallet-only desktop without `org.freedesktop.secrets`). Sign in with Firefox, which needs no keyring. |
 | `keyring=missing`                   | The browser has not stored a Safe Storage password yet; its `v11` cookies are unreadable. Start the browser once, or use another browser. |
+| Keyring prompt or D-Bus hangs       | Keyring calls are bounded — five seconds, up to sixty for an unlock prompt, so one exchange ends within about sixty-five — then the dialog is dismissed and the connection closed. A hung keyring slows one refresh; it cannot stall it indefinitely. Run `/quota` again. |
 | Login required                      | Sign in again at `home.qwencloud.com`. The browser can stay open, and other browsers and profiles are still tried automatically. |
 | Session found but console rejects it | The profile holds an Alibaba login that the QwenCloud console does not accept. That profile is skipped and the next one is tried; sign in to the Token Plan console in that browser if it is the only one. |
 | Quota refresh feels slow            | The console API answers in seconds. One refresh is bounded by a total budget and cached for `minIntervalMs`. |

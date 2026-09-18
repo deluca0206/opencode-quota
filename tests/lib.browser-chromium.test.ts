@@ -1,12 +1,13 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   CHROMIUM_BROWSER_DESCRIPTORS,
   CHROMIUM_ROOT_PROFILE_LABEL,
   chromiumBrowserRoots,
+  isProfileNameInsideRoot,
   listChromiumCookieStores,
   parseChromiumLocalStateProfiles,
   readChromiumCookies,
@@ -174,6 +175,46 @@ describe("Chromium browser discovery", () => {
     expect(stores.find((store) => store.rootPath === rootPath)?.keyringApplications).toContain(
       "chrome",
     );
+  });
+
+  it("ignores Local State profile names that leave the browser root", async () => {
+    const home = await createHome();
+    const rootPath = join(home, ".config", "google-chrome");
+    await createChromiumProfile({ rootPath, profile: "Default", nowMs: NOW_MS });
+    // A real cookie database outside the root, which a hostile Local State could
+    // otherwise point the reader at.
+    const outsideRoot = join(home, "outside");
+    await createChromiumProfile({ rootPath: outsideRoot, profile: "Default", nowMs: NOW_MS });
+    await writeFile(
+      join(rootPath, "Local State"),
+      JSON.stringify({
+        profile: {
+          info_cache: {
+            "../../outside/Default": {},
+            "/etc": {},
+            "..": {},
+            ".": {},
+            Default: {},
+          },
+          last_used: "../../outside/Default",
+        },
+      }),
+    );
+
+    const stores = await listChromiumCookieStores({ homeDir: home, env: {} });
+    const chrome = stores.filter((store) => store.rootPath === rootPath);
+    expect(chrome.map((store) => store.profile)).toEqual(["Default"]);
+    expect(chrome.every((store) => store.dbPath.startsWith(`${rootPath}${sep}`))).toBe(true);
+    // A `last_used` outside the root must not suppress the real preference.
+    expect(chrome[0]?.preferred).toBe(true);
+
+    expect(isProfileNameInsideRoot(rootPath, "../../outside/Default")).toBe(false);
+    expect(isProfileNameInsideRoot(rootPath, "/etc")).toBe(false);
+    expect(isProfileNameInsideRoot(rootPath, "..")).toBe(false);
+    expect(isProfileNameInsideRoot(rootPath, ".")).toBe(false);
+    expect(isProfileNameInsideRoot(rootPath, "")).toBe(false);
+    expect(isProfileNameInsideRoot(rootPath, "Profile 1")).toBe(true);
+    expect(isProfileNameInsideRoot(rootPath, "Custom Dir")).toBe(true);
   });
 
   it("reads a browser that keeps its cookie database at the root", async () => {

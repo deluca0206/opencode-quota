@@ -185,7 +185,7 @@ export async function queryQwenCloudTokenPlan(params: {
       if (!usage.success) {
         return {
           kind: "failed",
-          loginSuspected: /login required/iu.test(usage.error),
+          loginSuspected: usage.reason === "login_required" || /login required/iu.test(usage.error),
           result: usage,
         };
       }
@@ -430,16 +430,28 @@ async function fetchQwenCloudApi(params: {
   fetchFn?: typeof fetch;
   optional?: boolean;
 }): Promise<
-  { success: true; json: unknown } | { success: false; error: string; retryable?: boolean }
+  | { success: true; json: unknown }
+  | {
+      success: false;
+      error: string;
+      retryable?: boolean;
+      /** Why the call failed, so a rejected session can fall back to another profile. */
+      reason?: QwenCloudFailureReason;
+    }
 > {
   if (params.timeoutMs <= 0) {
     return params.optional
       ? { success: false, error: "optional" }
-      : { success: false, error: QWENCLOUD_BUDGET_EXHAUSTED_MESSAGE, retryable: true };
+      : {
+          success: false,
+          error: QWENCLOUD_BUDGET_EXHAUSTED_MESSAGE,
+          retryable: true,
+          reason: "transport",
+        };
   }
   const url = qwenCloudApiUrl(params.origins.dataOrigin, params.api);
   if (!isAuthorizedQwenCloudRequestUrl(new URL(url))) {
-    return { success: false, error: "QwenCloud host override is not allowed." };
+    return { success: false, error: "QwenCloud host override is not allowed.", reason: "invalid" };
   }
   const cookieHeader = cookieHeaderFromCookies(params.cookies);
   const cna = cookieValue(params.cookies, "cna");
@@ -511,6 +523,7 @@ async function fetchQwenCloudApi(params: {
             `QwenCloud request failed (HTTP ${response.status}).`,
             params.optional,
             false,
+            "invalid",
           );
         }
         try {
@@ -521,6 +534,7 @@ async function fetchQwenCloudApi(params: {
             "QwenCloud response could not be parsed.",
             params.optional,
             false,
+            "invalid",
           );
         }
       },
@@ -531,6 +545,7 @@ async function fetchQwenCloudApi(params: {
       success: false,
       error: sanitizeVisibleError(error, [...params.secrets, params.secToken]),
       retryable: isRetryableError(error),
+      reason: "transport",
     };
   }
 }
@@ -731,22 +746,29 @@ function classifyTransportError(error: unknown): TransportFailureReason {
   return "invalid";
 }
 
-function loginResult(optional?: boolean): { success: false; error: string } {
-  return {
-    success: false,
-    error: optional
-      ? "unavailable"
-      : "QwenCloud login required. Sign in at home.qwencloud.com and retry.",
-  };
+function loginResult(optional?: boolean): {
+  success: false;
+  error: string;
+  retryable?: boolean;
+  reason?: QwenCloudFailureReason;
+} {
+  return optional
+    ? { success: false, error: "unavailable" }
+    : {
+        success: false,
+        error: "QwenCloud login required. Sign in at home.qwencloud.com and retry.",
+        reason: "login_required",
+      };
 }
 
 function unavailableResult(
   error: string,
   optional: boolean | undefined,
   retryable: boolean,
-): { success: false; error: string; retryable?: boolean } {
+  reason: QwenCloudFailureReason = "transport",
+): { success: false; error: string; retryable?: boolean; reason?: QwenCloudFailureReason } {
   if (optional) return { success: false, error: "optional" };
-  return { success: false, error, ...(retryable ? { retryable: true } : {}) };
+  return { success: false, error, reason, ...(retryable ? { retryable: true } : {}) };
 }
 
 function sanitizeVisibleError(error: unknown, secrets: readonly string[]): string {

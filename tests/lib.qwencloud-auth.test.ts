@@ -371,6 +371,52 @@ describe("QwenCloud auth resolution", () => {
     expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenCalledTimes(2);
   });
 
+  it("re-checks the browser inventory while no session is known", async () => {
+    browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
+      state: "no_session",
+      stores: [STORE],
+      keyringSeen: false,
+    });
+    const { resolveQwenCloudAuthCached, clearQwenCloudAuthCacheForTests } = await loadAuth();
+    clearQwenCloudAuthCacheForTests();
+
+    await resolveQwenCloudAuthCached({ nowMs: 1_000 });
+    expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
+    await resolveQwenCloudAuthCached({ nowMs: 20_000 });
+    expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
+
+    // Past the negative window the inventory is rebuilt too, so a profile created
+    // after a failed sign-in is found without waiting out the positive window.
+    await resolveQwenCloudAuthCached({ nowMs: 40_000 });
+    expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-discovers the browsers right after the console rejects a session", async () => {
+    browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
+      state: "imported",
+      store: STORE,
+      cookies: [{ name: "login_qwencloud_ticket", value: "ff-secret", host: ".qwencloud.com" }],
+    });
+    const { resolveQwenCloudAuth, markQwenCloudSessionRejected, clearQwenCloudAuthCacheForTests } =
+      await loadAuth();
+    clearQwenCloudAuthCacheForTests();
+
+    await resolveQwenCloudAuth({ nowMs: 1_000 });
+    expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
+
+    // Inside the discovery window a positive inventory is reused.
+    await resolveQwenCloudAuth({ nowMs: 2_000 });
+    expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(1);
+
+    markQwenCloudSessionRejected("browser:firefox/default-release");
+    browserMocks.discoverBrowserCookieStores.mockResolvedValue([STORE, CHROMIUM_STORE]);
+    await resolveQwenCloudAuth({ nowMs: 3_000 });
+    expect(browserMocks.discoverBrowserCookieStores).toHaveBeenCalledTimes(2);
+    expect(browserMocks.importBrowserQwenCloudSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ excludeStorePaths: [STORE.dbPath] }),
+    );
+  });
+
   it("retries an unreadable store once within the same resolution", async () => {
     browserMocks.importBrowserQwenCloudSession.mockResolvedValue({
       state: "unreadable",

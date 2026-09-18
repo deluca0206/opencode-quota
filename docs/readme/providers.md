@@ -458,21 +458,24 @@ No environment variable, companion CLI, external command, system package, browse
 1. Sign in at `https://home.qwencloud.com/billing/subscription/token-plan-individual` in the browser you already use.
 2. Run `/quota`. OpenCode Quota finds the browser, reads the session, validates it, and reports quota.
 
-On Linux these browsers are detected: Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, and Opera — native, Flatpak, and Snap installs, release channels included. Browser detection itself is Linux-only; see the platform note below. Every profile is considered, including profiles only named in the browser's own `Local State`, and reading stops at the first profile whose login the console hosts actually accept. Cookie databases are opened read-only and only QwenCloud-related cookies from the default context are used; the original database is never modified.
+On Linux these browsers are detected: Firefox, Chrome, Chromium, Brave, Edge, Vivaldi, and Opera — native and Flatpak installs, plus Snap installs of Firefox, Chromium, Brave, and Opera (the browsers that publish one), and release channels included. Browser detection itself is Linux-only; see the platform note below. Every profile is considered, including profiles only named in the browser's own `Local State`, and reading stops at the first profile whose login the console hosts actually accept. Profile names taken from `Local State` are only used when they resolve inside that browser's own directory. Cookie databases are opened read-only and only QwenCloud-related cookies from the default context are used; the original database is never modified.
 
 #### Keyring-protected Chromium cookies
 
 Chrome, Chromium, Brave, and Edge encrypt cookie values with a password kept in the desktop keyring (`v11`). OpenCode Quota reads that password straight from the freedesktop Secret Service (`org.freedesktop.secrets`) over the session D-Bus, using a pure-JavaScript client installed with the package. Nothing extra has to be installed, and no helper binary is invoked.
 
+Every schema and application combination the browser may have used is searched, and each distinct Safe Storage password found is kept in priority order: the one that encrypted a given cookie database is not necessarily the first, so decryption validates them instead of guessing.
+
 - GNOME Keyring and any other Secret Service implementation work as-is.
-- If the keyring is locked, the desktop shows its own standard unlock prompt once; dismissing it simply moves the sweep on to the next browser.
+- If the keyring is locked, the desktop shows its own standard unlock prompt once. One dialog unlocks the whole keyring, so no second browser raises another for a minute; dismissing it moves the sweep on to the next browser. No prompt is shown at all once a password has been read.
+- Keyring calls are bounded to five seconds and an unlock prompt — which waits for a human — to sixty, so one exchange ends after at most sixty-five seconds. When a budget runs out the dialog is dismissed and the D-Bus connection is closed, which bounds a refresh instead of letting a hung keyring stall it indefinitely.
 - Passwords are held only in memory for the lifetime of the process, never logged, and never written to disk.
 - A KDE desktop that exposes Secret Service works too. KWallet-only setups without a Secret Service implementation are not covered yet.
 - Browser session reading covers **Linux only** for now. macOS Keychain and Windows profiles — including Windows app-bound (`v20`) values — are not read yet; on those platforms the provider stays silent unless a `QWEN_CLOUD_COOKIE` override is set.
 
 #### Browser selection and fallback
 
-Stores are tried most recently written first, counting write-ahead-log and journal activity, and the profile whose session was last accepted by the console is tried first afterwards. A profile the console rejects is dropped and the next browser or profile is tried in the same refresh, bounded to a few candidates so one `/quota` never turns into a sweep of every profile. A missing or expired login in one browser therefore never hides a working login in another.
+Stores are tried most recently written first, counting write-ahead-log and journal activity, and the profile whose session was last accepted by the console is tried first afterwards. A profile the console rejects is dropped and the next browser or profile is tried in the same refresh, so a missing or expired login in one browser never hides a working login in another. The chain keeps going until a session is accepted, and is bounded by a wall-clock budget of one minute plus a hard candidate cap so a machine full of expired logins cannot turn one `/quota` into an endless sweep. A profile already tried in this refresh is never validated twice.
 
 Reading never waits long on a running browser: one open is bounded to 15 ms, a store that lost the race is not retried for ten seconds, and when the browser holds its cookie database or keeps a fresh login in an uncheckpointed write-ahead log, the store is re-read through a private temporary copy in a `0700` directory that is deleted as soon as the read finishes. A sign-in performed with the browser open shows up within a few seconds — no browser restart. If even that fails, the last successfully read session is reused for up to ten minutes (marked as stale in `/quota_status`) and a fresh read retries within about thirty seconds.
 

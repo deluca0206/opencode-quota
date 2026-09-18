@@ -51,10 +51,22 @@ const CREDIT_UNIT = { kind: "count", unit: "credit" } as const;
  * Browser profiles one refresh may validate against the console.
  *
  * A rejected session fails fast (the console answers before any quota window is
- * fetched), so trying a couple of profiles costs little; the bound keeps a
- * machine full of expired logins from turning one refresh into a sweep.
+ * fetched), so sweeping several expired profiles costs little and must not hide a
+ * valid login behind them. The bound only stops a pathological machine full of
+ * profiles from turning one refresh into an unbounded sweep; the wall-clock budget
+ * below is what normally ends the chain.
  */
-const MAX_SESSION_CANDIDATES_PER_REFRESH = 3;
+const MAX_SESSION_CANDIDATES_PER_REFRESH = 8;
+
+/**
+ * Wall-clock budget for validating browser profiles in one refresh.
+ *
+ * Every rejected profile costs a single fast console round trip and the accepted
+ * one costs a full refresh (`QWENCLOUD_TOTAL_BUDGET_MS`), so this leaves room for
+ * a handful of expired logins plus one successful query without letting a hung
+ * keyring or console stall the refresh indefinitely.
+ */
+const SESSION_SWEEP_BUDGET_MS = 60_000;
 
 export const qwenCloudTokenPlanProvider: QuotaProvider = {
   id: "qwencloud-token-plan",
@@ -103,27 +115,38 @@ export const qwenCloudTokenPlanProvider: QuotaProvider = {
         : undefined,
       totalBudgetMs: QWENCLOUD_TOTAL_BUDGET_MS,
     };
+    const sweepStartedAt = Date.now();
+    const sweepRemainingMs = (): number =>
+      Math.max(0, SESSION_SWEEP_BUDGET_MS - (Date.now() - sweepStartedAt));
 
     // The quota call is also the session check: a profile whose login the console
     // rejects is dropped and the next browser or profile is tried.
     let result = await queryQwenCloudTokenPlan({ session: auth.session, ...queryOptions });
+    const triedStorePaths = new Set<string>(auth.storePath ? [auth.storePath] : []);
     for (
       let attempt = 1;
       !result.success &&
       result.reason === "login_required" &&
-      attempt < MAX_SESSION_CANDIDATES_PER_REFRESH;
+      attempt < MAX_SESSION_CANDIDATES_PER_REFRESH &&
+      sweepRemainingMs() > 0;
       attempt += 1
     ) {
-      const rejectedPath = auth.storePath;
       markQwenCloudSessionRejected(auth.source);
       const next = await resolveQwenCloudAuthWithDiagnostics({
         maxAgeMs: DEFAULT_QWENCLOUD_AUTH_CACHE_MAX_AGE_MS,
       });
       if (next.auth.state !== "configured") break;
-      if (!rejectedPath || next.auth.storePath === rejectedPath) break;
+      // Resolution is expected to skip rejected stores; a repeated one means the
+      // sweep has nothing new to offer and must not be retried in a tight loop.
+      if (!next.auth.storePath || triedStorePaths.has(next.auth.storePath)) break;
+      triedStorePaths.add(next.auth.storePath);
       auth = next.auth;
       diagnostics = next.diagnostics;
-      result = await queryQwenCloudTokenPlan({ session: auth.session, ...queryOptions });
+      result = await queryQwenCloudTokenPlan({
+        session: auth.session,
+        ...queryOptions,
+        totalBudgetMs: Math.min(QWENCLOUD_TOTAL_BUDGET_MS, sweepRemainingMs()),
+      });
     }
 
     const statusDetails = buildStatusDetails(diagnostics, activation);

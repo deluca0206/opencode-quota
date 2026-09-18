@@ -20,11 +20,33 @@ export const SECRET_SERVICE_TIMEOUT_MS = 5_000;
 /** Bound for a user-facing unlock prompt, which waits for a human. */
 export const SECRET_SERVICE_PROMPT_TIMEOUT_MS = 60_000;
 
+/** Bound for closing the session and bus once the exchange is over or timed out. */
+export const SECRET_SERVICE_CLEANUP_TIMEOUT_MS = 500;
+
 /** How long a failed lookup is remembered, so an absent bus is not retried per render. */
 export const SECRET_SERVICE_FAILURE_CACHE_MS = 60_000;
 
+/**
+ * How long one user-facing unlock prompt covers every other lookup.
+ *
+ * A Secret Service prompt unlocks the whole collection, not one item, so asking
+ * again straight afterwards cannot succeed where the first attempt did not — it
+ * would only stack a dialog per installed Chromium browser. `0` disables the
+ * latch.
+ */
+export const SECRET_SERVICE_PROMPT_LATCH_MS = 60_000;
+
 /** Cap on schema/application combinations tried for one request. */
 export const SECRET_SERVICE_MAX_CANDIDATES = 8;
+
+/**
+ * Cap on Safe Storage passwords returned for one request.
+ *
+ * More than one Chromium product can share a keyring, and any of them may be the
+ * one that encrypted a given cookie database, so several candidates are kept in
+ * priority order for the decryptor to validate.
+ */
+export const SECRET_SERVICE_MAX_SECRETS = 8;
 
 /**
  * Minimal Secret Service surface used by the key store.
@@ -47,6 +69,15 @@ export interface SecretServiceTransport {
 export type SecretServiceTransportFactory = (options: {
   timeoutMs: number;
   promptTimeoutMs: number;
+  /** Wall-clock end of the machine-to-machine calls. */
+  deadlineAt?: number;
+  /**
+   * Wall-clock end of the whole exchange, one unlock prompt included.
+   *
+   * A prompt waits for a human and is bounded by this rather than `deadlineAt`;
+   * it falls back to `deadlineAt` when a factory is only given that.
+   */
+  promptDeadlineAt?: number;
 }) => Promise<SecretServiceTransport>;
 
 export interface SecretServiceKeyStoreOptions {
@@ -55,6 +86,8 @@ export interface SecretServiceKeyStoreOptions {
   timeoutMs?: number;
   promptTimeoutMs?: number;
   failureCacheMs?: number;
+  /** Window in which one unlock prompt covers every lookup; `0` always prompts. */
+  promptLatchMs?: number;
 }
 
 export class SecretServiceError extends Error {
@@ -84,7 +117,10 @@ export function createSecretServiceKeyStore(
   const timeoutMs = options.timeoutMs ?? SECRET_SERVICE_TIMEOUT_MS;
   const promptTimeoutMs = options.promptTimeoutMs ?? SECRET_SERVICE_PROMPT_TIMEOUT_MS;
   const failureCacheMs = options.failureCacheMs ?? SECRET_SERVICE_FAILURE_CACHE_MS;
+  const promptLatchMs = options.promptLatchMs ?? SECRET_SERVICE_PROMPT_LATCH_MS;
   const failures = new Map<string, { lookup: SystemSecretLookup; at: number }>();
+  /** When this store last showed an unlock dialog; shared by every browser. */
+  const promptLatch = { at: 0 };
 
   return {
     id: "secret-service",
@@ -103,6 +139,8 @@ export function createSecretServiceKeyStore(
         lookup = await lookupSecrets(request, {
           timeoutMs,
           promptTimeoutMs,
+          promptLatchMs,
+          promptLatch,
           transportFactory: options.transportFactory ?? createDbusSecretServiceTransport,
         });
       } catch (error) {
@@ -119,59 +157,200 @@ export function createSecretServiceKeyStore(
   };
 }
 
+/**
+ * Wall-clock bound for one phase of the keyring exchange.
+ *
+ * Every individual call is raced against the remaining budget, and the bus is
+ * disposed when the budget runs out — closing the connection is what actually
+ * cancels an in-flight D-Bus call, since the protocol offers no cancellation.
+ */
+interface SecretServiceDeadline {
+  /** Absolute end of the current budget, for callers that clamp their own timers. */
+  readonly at: number;
+  expired(): boolean;
+  /** Grant another `ms`, never past the ceiling this deadline was built with. */
+  extend(ms: number): void;
+  run<T>(task: () => Promise<T>, label: string): Promise<T>;
+}
+
+function createSecretServiceDeadline(timeoutMs: number, ceilingAt?: number): SecretServiceDeadline {
+  let deadlineAt = Date.now() + Math.max(0, timeoutMs);
+  const timeout = (label: string): SecretServiceError =>
+    new SecretServiceError("timeout", `Secret Service ${label} timed out`);
+  return {
+    get at() {
+      return deadlineAt;
+    },
+    expired: () => Date.now() >= deadlineAt,
+    extend(ms: number) {
+      const extended = Date.now() + Math.max(0, ms);
+      deadlineAt =
+        ceilingAt === undefined ? extended : Math.min(ceilingAt, Math.max(deadlineAt, extended));
+    },
+    run(task, label) {
+      const remaining = deadlineAt - Date.now();
+      if (remaining <= 0) return Promise.reject(timeout(label));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const guard = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(timeout(label)), remaining);
+        if (typeof timer.unref === "function") timer.unref();
+      });
+      // The task is invoked inside a promise: a synchronous throw must not skip the
+      // race and leave the guard timer behind as an unhandled rejection.
+      return Promise.race([Promise.resolve().then(task), guard]).finally(() => {
+        if (timer !== undefined) clearTimeout(timer);
+      });
+    },
+  };
+}
+
+/**
+ * Whether the user may be asked to unlock the keyring.
+ *
+ * One prompt unlocks the whole collection, so a second one inside the latch
+ * window cannot help; it would only stack a dialog per installed browser while
+ * every Chromium store is being read.
+ */
+function mayPrompt(latch: { at: number }, latchMs: number): boolean {
+  if (latchMs <= 0 || latch.at === 0) return true;
+  return Date.now() - latch.at >= latchMs;
+}
+
 async function lookupSecrets(
   request: SystemSecretRequest,
   options: {
     timeoutMs: number;
     promptTimeoutMs: number;
+    promptLatchMs: number;
+    promptLatch: { at: number };
     transportFactory: SecretServiceTransportFactory;
   },
 ): Promise<SystemSecretLookup> {
-  const transport = await options.transportFactory({
+  const startedAt = Date.now();
+  // An unlock prompt waits for a human, so the exchange as a whole may outlive the
+  // machine-to-machine budget by exactly one prompt — but never more than that.
+  const ceilingAt =
+    startedAt + Math.max(0, options.timeoutMs) + Math.max(0, options.promptTimeoutMs);
+  const deadline = createSecretServiceDeadline(options.timeoutMs, ceilingAt);
+  const connecting = options.transportFactory({
     timeoutMs: options.timeoutMs,
     promptTimeoutMs: options.promptTimeoutMs,
+    deadlineAt: deadline.at,
+    promptDeadlineAt: ceilingAt,
   });
-  let sessionPath: string | null = null;
+  let transport: SecretServiceTransport;
   try {
-    sessionPath = await transport.openSession();
-    let sawLocked = false;
+    transport = await deadline.run(() => connecting, "connection");
+  } catch (error) {
+    // A bus that arrives after the deadline must still be torn down.
+    void connecting.then((late) => late.dispose()).catch(() => {});
+    throw error;
+  }
+
+  let sessionPath: string | null = null;
+  let sawLocked = false;
+  let dismissed = false;
+  // Every schema/application combination contributes candidates: the password that
+  // encrypted a cookie database is not necessarily the first one found, so the
+  // decryptor validates them in priority order instead of guessing here.
+  const secrets: string[] = [];
+  const seen = new Set<string>();
+  try {
+    sessionPath = await deadline.run(() => transport.openSession(), "session");
 
     for (const attributes of secretAttributeCandidates(request)) {
-      const found = await transport.searchItems(attributes);
+      if (secrets.length >= SECRET_SERVICE_MAX_SECRETS || deadline.expired()) break;
+      const found = await deadline.run(() => transport.searchItems(attributes), "search");
       let itemPaths = found.unlocked;
 
       if (itemPaths.length === 0 && found.locked.length > 0) {
         sawLocked = true;
-        const unlocked = await transport.unlock(found.locked);
-        itemPaths = unlocked.unlocked;
-        if (
-          itemPaths.length === 0 &&
-          unlocked.promptPath &&
-          unlocked.promptPath !== NO_PROMPT_PATH
-        ) {
-          const prompted = await transport.prompt(unlocked.promptPath);
-          if (prompted.dismissed) return { state: "locked" };
-          itemPaths = prompted.unlocked;
+        // Never ask the user to unlock a keyring once a usable password is known.
+        if (secrets.length === 0) {
+          const locked = found.locked;
+          const unlocked = await deadline.run(() => transport.unlock(locked), "unlock");
+          itemPaths = unlocked.unlocked;
+          if (
+            itemPaths.length === 0 &&
+            unlocked.promptPath &&
+            unlocked.promptPath !== NO_PROMPT_PATH &&
+            mayPrompt(options.promptLatch, options.promptLatchMs)
+          ) {
+            // Claim the latch before waiting, so a concurrent lookup cannot stack
+            // a second dialog, and reclaim it once the dialog is gone: a prompt
+            // nobody answers would otherwise consume exactly its own window and
+            // let the next browser raise another one.
+            options.promptLatch.at = Date.now();
+            const promptPath = unlocked.promptPath;
+            // The prompt gets its own budget: bounding a human interaction to the
+            // few seconds the machine calls share would dismiss the desktop dialog
+            // before it can be answered.
+            const promptDeadline = createSecretServiceDeadline(
+              Math.max(0, Math.min(options.promptTimeoutMs, ceilingAt - Date.now())),
+            );
+            let prompted: { dismissed: boolean; unlocked: string[] };
+            try {
+              prompted = await promptDeadline.run(() => transport.prompt(promptPath), "prompt");
+            } finally {
+              options.promptLatch.at = Date.now();
+            }
+            if (prompted.dismissed) {
+              dismissed = true;
+              break;
+            }
+            itemPaths = prompted.unlocked;
+            // Waiting for the user spent the machine budget; the read that follows
+            // still needs one, and the ceiling keeps the exchange bounded.
+            deadline.extend(options.timeoutMs);
+          }
         }
       }
 
       if (itemPaths.length === 0) continue;
 
-      const secrets = await transport.getSecrets(itemPaths, sessionPath);
-      const usable = secrets.filter((secret) => secret.length > 0);
-      if (usable.length > 0) return { state: "available", secrets: usable };
-    }
-
-    return sawLocked ? { state: "locked" } : { state: "missing" };
-  } finally {
-    if (sessionPath) {
-      try {
-        await transport.closeSession(sessionPath);
-      } catch {
-        // A session the service already dropped needs no cleanup.
+      const paths = itemPaths;
+      const session = sessionPath;
+      const foundSecrets = await deadline.run(() => transport.getSecrets(paths, session), "read");
+      for (const secret of foundSecrets) {
+        if (!secret || seen.has(secret)) continue;
+        seen.add(secret);
+        secrets.push(secret);
+        if (secrets.length >= SECRET_SERVICE_MAX_SECRETS) break;
       }
     }
-    await transport.dispose();
+  } catch (error) {
+    // A later candidate that hangs or is refused must not throw away the
+    // passwords already read: the decryptor validates each one on its own.
+    if (secrets.length === 0) throw error;
+  } finally {
+    // Teardown is bounded too: a bus that stopped answering must not outlive the
+    // exchange it was opened for.
+    const cleanupMs = Math.min(options.timeoutMs, SECRET_SERVICE_CLEANUP_TIMEOUT_MS);
+    if (sessionPath && !deadline.expired()) {
+      const closing = sessionPath;
+      await settleWithin(() => transport.closeSession(closing), cleanupMs);
+    }
+    await settleWithin(() => transport.dispose(), cleanupMs);
+  }
+
+  if (secrets.length > 0) return { state: "available", secrets };
+  if (dismissed || sawLocked) return { state: "locked" };
+  return { state: "missing" };
+}
+
+/** Await cleanup, giving up after `ms` instead of hanging the caller. */
+async function settleWithin(task: () => Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      task().catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, ms));
+        if (typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -283,6 +462,8 @@ async function loadDbusModule(): Promise<DbusModuleLike> {
 export const createDbusSecretServiceTransport: SecretServiceTransportFactory = async ({
   timeoutMs,
   promptTimeoutMs,
+  deadlineAt,
+  promptDeadlineAt,
 }) => {
   const dbus = await loadDbusModule();
   if (typeof dbus.sessionBus !== "function") {
@@ -366,7 +547,14 @@ export const createDbusSecretServiceTransport: SecretServiceTransportFactory = a
     },
 
     prompt(promptPath) {
-      return withPromptCompletion(service, promptPath, promptTimeoutMs, unwrap, async (iface) => {
+      // A prompt waits for a human, but never past the end of the exchange that
+      // asked for it.
+      const ceiling = promptDeadlineAt ?? deadlineAt;
+      const budgetMs =
+        ceiling === undefined
+          ? promptTimeoutMs
+          : Math.max(0, Math.min(promptTimeoutMs, ceiling - Date.now()));
+      return withPromptCompletion(service, promptPath, budgetMs, unwrap, async (iface) => {
         const start = iface.Prompt;
         if (typeof start !== "function") {
           throw new SecretServiceError("protocol", "Secret Service prompt is unavailable");
@@ -429,6 +617,9 @@ async function withPromptCompletion(
     };
     const timer = setTimeout(() => {
       emitter.off?.("Completed", listener);
+      // Leaving the desktop dialog open after giving up would keep prompting the
+      // user for a keyring this process no longer waits for.
+      void dismissPrompt(iface);
       reject(new SecretServiceError("timeout", "keyring unlock prompt timed out"));
     }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
@@ -442,6 +633,17 @@ async function withPromptCompletion(
       reject(error);
     }
   });
+}
+
+/** Best-effort `Prompt.Dismiss`; a dialog the service already closed needs none. */
+async function dismissPrompt(iface: DbusInterfaceLike): Promise<void> {
+  const dismiss = iface.Dismiss;
+  if (typeof dismiss !== "function") return;
+  try {
+    await Reflect.apply(dismiss as (...values: unknown[]) => unknown, iface, []);
+  } catch {
+    // The prompt is already gone; there is nothing left to cancel.
+  }
 }
 
 function asObjectPaths(value: unknown): string[] {

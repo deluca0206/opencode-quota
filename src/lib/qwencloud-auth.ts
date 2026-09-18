@@ -307,8 +307,14 @@ async function resolveBrowserStores(params: {
   homeDir?: string;
   now: number;
 }): Promise<BrowserCookieStore[]> {
-  const fresh =
-    cachedDiscovery && params.now - cachedDiscovery.at < QWENCLOUD_BROWSER_DISCOVERY_MAX_AGE_MS;
+  // A negative view of the installed browsers is re-checked as often as the
+  // negative session itself, so a profile created after a failed sign-in attempt
+  // is found within seconds instead of waiting out the positive cache window.
+  const maxAgeMs =
+    cachedEntry === null || cachedEntry.auth.state === "none"
+      ? Math.min(QWENCLOUD_BROWSER_DISCOVERY_MAX_AGE_MS, QWENCLOUD_NEGATIVE_AUTH_CACHE_MS)
+      : QWENCLOUD_BROWSER_DISCOVERY_MAX_AGE_MS;
+  const fresh = cachedDiscovery && params.now - cachedDiscovery.at < maxAgeMs;
   if (fresh && cachedDiscovery) return cachedDiscovery.stores;
 
   const stores = await discoverBrowserCookieStores({
@@ -382,8 +388,9 @@ export function markQwenCloudSessionValidated(source?: string | null): void {
 /**
  * Record that QwenCloud rejected the session this process resolved last.
  *
- * The cached auth entry and any stale copy of that session are dropped so the
- * next resolution continues the sweep with a different browser or profile.
+ * The cached auth entry, the cached browser inventory, and any stale copy of that
+ * session are dropped so the next resolution re-discovers the browsers and
+ * continues the sweep with a different profile.
  */
 export function markQwenCloudSessionRejected(source?: string | null): void {
   const entry = cachedEntry;
@@ -400,6 +407,9 @@ export function markQwenCloudSessionRejected(source?: string | null): void {
   if (lastValidatedStorePath === entry.storePath) lastValidatedStorePath = null;
   if (lastGoodSession?.auth.storePath === entry.storePath) lastGoodSession = null;
   cachedEntry = null;
+  // A rejected session means the inventory it came from may be stale: a profile
+  // created since the last discovery has to be visible to the very next sweep.
+  cachedDiscovery = null;
 }
 
 /** Store paths QwenCloud rejected; exposed for status reporting, never values. */

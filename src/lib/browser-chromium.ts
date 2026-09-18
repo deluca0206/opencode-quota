@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { chromiumValueProtection, decryptChromiumCookieValue } from "./browser-chromium-crypto.js";
 import {
   type BrowserCookie,
@@ -280,11 +280,16 @@ export async function listChromiumProfiles(
     // A browser without Local State still has discoverable profile directories.
   }
 
-  const names = new Set<string>(localState.profiles);
+  // `Local State` is browser-controlled JSON, so its profile names are only used
+  // when they resolve to a directory inside this browser root.
+  const names = new Set<string>(
+    localState.profiles.filter((name) => isProfileNameInsideRoot(rootPath, name)),
+  );
   if (await isDirectory(join(rootPath, "Default"))) names.add("Default");
   try {
     for (const entry of await readdir(rootPath, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      if (!isProfileNameInsideRoot(rootPath, entry.name)) continue;
       if (/^Profile \d+$/u.test(entry.name) || entry.name === "Guest Profile") {
         names.add(entry.name);
         continue;
@@ -297,11 +302,28 @@ export async function listChromiumProfiles(
     // An unreadable root contributes the profiles found so far.
   }
 
-  const preferredName = localState.lastUsed ?? (names.has("Default") ? "Default" : null);
+  const lastUsed =
+    localState.lastUsed !== null && isProfileNameInsideRoot(rootPath, localState.lastUsed)
+      ? localState.lastUsed
+      : null;
+  const preferredName = lastUsed ?? (names.has("Default") ? "Default" : null);
   return [...names]
     .filter((name) => name !== CHROMIUM_ROOT_PROFILE_LABEL)
     .sort()
     .map((name) => ({ name, preferred: name === preferredName }));
+}
+
+/**
+ * Whether a profile name stays inside the browser root.
+ *
+ * Rejects absolute paths, `..` segments, and anything that resolves outside the
+ * root, so a hostile `Local State` cannot point the reader at another directory.
+ */
+export function isProfileNameInsideRoot(rootPath: string, name: string): boolean {
+  if (!name || name.includes("\0")) return false;
+  const root = resolve(rootPath);
+  const candidate = resolve(root, name);
+  return candidate !== root && candidate.startsWith(root + sep);
 }
 
 async function hasCookieDatabase(profilePath: string): Promise<boolean> {

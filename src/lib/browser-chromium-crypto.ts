@@ -113,22 +113,27 @@ function decryptWithPassword(
   password: string,
   context: ChromiumDecryptionContext,
 ): ChromiumDecryptionResult {
+  // The derived key and the decrypted bytes are only useful inside this call, so
+  // both are cleared as soon as the value has been read out of them.
+  const key = deriveChromiumKey(password);
   try {
-    const decipher = createDecipheriv(
-      "aes-128-cbc",
-      deriveChromiumKey(password),
-      Buffer.alloc(16, CHROMIUM_IV_BYTE),
-    );
+    const decipher = createDecipheriv("aes-128-cbc", key, Buffer.alloc(16, CHROMIUM_IV_BYTE));
     const plain = Buffer.concat([
       decipher.update(Buffer.from(bytes.subarray(3))),
       decipher.final(),
     ]);
-    const value = stripHostDigest(plain, context);
-    if (value === null) return { state: "invalid" };
-    const text = printableOrNull(value.toString("utf8"));
-    return text === null ? { state: "invalid" } : { state: "decrypted", value: text };
+    try {
+      const value = stripHostDigest(plain, context);
+      if (value === null) return { state: "invalid" };
+      const text = printableOrNull(value.toString("utf8"));
+      return text === null ? { state: "invalid" } : { state: "decrypted", value: text };
+    } finally {
+      plain.fill(0);
+    }
   } catch {
     return { state: "invalid" };
+  } finally {
+    key.fill(0);
   }
 }
 

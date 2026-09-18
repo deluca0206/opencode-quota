@@ -138,6 +138,7 @@ describe("QwenCloud API client", () => {
     expect(login).toMatchObject({ success: false });
     expect(JSON.stringify(login)).not.toContain(TICKET);
     expect(login.success === false && login.error).toMatch(/login required/u);
+    expect(login.success === false && login.reason).toBe("login_required");
 
     const unauthorized = await queryQwenCloudTokenPlan({
       session,
@@ -145,6 +146,16 @@ describe("QwenCloud API client", () => {
     });
     expect(unauthorized.success).toBe(false);
     expect(JSON.stringify(unauthorized)).not.toContain(TICKET);
+    // A rejected session has to be recognisable as such, or the provider cannot
+    // fall back to the next browser profile.
+    expect(unauthorized.success === false && unauthorized.reason).toBe("login_required");
+    expect(unauthorized.success === false && unauthorized.retryable).not.toBe(true);
+
+    const forbidden = await queryQwenCloudTokenPlan({
+      session,
+      fetchFn: async () => jsonResponse({ error: TICKET }, 403),
+    });
+    expect(forbidden.success === false && forbidden.reason).toBe("login_required");
 
     const unavailable = await queryQwenCloudTokenPlan({
       session,
@@ -154,6 +165,7 @@ describe("QwenCloud API client", () => {
       success: false,
       error: "QwenCloud API is unavailable.",
       retryable: true,
+      reason: "transport",
     });
 
     const timeout = await queryQwenCloudTokenPlan({
@@ -313,6 +325,7 @@ describe("QwenCloud API client", () => {
       success: false,
       error: QWENCLOUD_BUDGET_EXHAUSTED_MESSAGE,
       retryable: true,
+      reason: "transport",
     });
     expect(fetchFn).not.toHaveBeenCalled();
   });

@@ -280,8 +280,30 @@ describe("Qwen/Alibaba Token Plan provider", () => {
     expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
   });
 
-  it("bounds how many profiles one refresh validates", async () => {
+  it("reaches a valid profile behind several expired ones", async () => {
     const profiles = ["google-chrome/Default", "brave-browser/Default", "firefox/a", "firefox/b"];
+    for (const [index, profile] of profiles.entries()) {
+      const auth = browserAuth(profile, `/tmp/store-${index}`);
+      mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValueOnce({
+        auth,
+        diagnostics: browserDiagnostics(auth),
+      });
+    }
+    mocks.queryQwenCloudTokenPlan
+      .mockResolvedValueOnce(loginRequired)
+      .mockResolvedValueOnce(loginRequired)
+      .mockResolvedValueOnce(loginRequired)
+      .mockResolvedValueOnce(standardSnapshot);
+
+    const result = await qwenCloudTokenPlanProvider.fetch(context());
+    expectAttemptedWithNoErrors(result);
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(4);
+    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(3);
+    expect(mocks.markQwenCloudSessionValidated).toHaveBeenCalledWith("browser:firefox/b");
+  });
+
+  it("bounds how many profiles one refresh validates", async () => {
+    const profiles = Array.from({ length: 10 }, (_, index) => `firefox/profile-${index}`);
     for (const [index, profile] of profiles.entries()) {
       const auth = browserAuth(profile, `/tmp/store-${index}`);
       mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValueOnce({
@@ -293,9 +315,96 @@ describe("Qwen/Alibaba Token Plan provider", () => {
 
     const result = await qwenCloudTokenPlanProvider.fetch(context());
     expect(result.attempted).toBe(true);
-    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(3);
-    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(2);
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(8);
+    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(7);
     expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
+  });
+
+  it("stops the sweep once the wall-clock budget is spent", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      for (const index of [0, 1, 2, 3]) {
+        const auth = browserAuth(`firefox/profile-${index}`, `/tmp/store-${index}`);
+        mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValueOnce({
+          auth,
+          diagnostics: browserDiagnostics(auth),
+        });
+      }
+      // Each console round trip costs half the sweep budget, so only two profiles
+      // fit even though more candidates are available.
+      mocks.queryQwenCloudTokenPlan.mockImplementation(async () => {
+        vi.advanceTimersByTime(30_000);
+        return loginRequired;
+      });
+
+      const result = await qwenCloudTokenPlanProvider.fetch(context());
+      expect(result.attempted).toBe(true);
+      expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(2);
+      expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not validate the same store twice in one refresh", async () => {
+    const chrome = browserAuth("google-chrome/Default", "/tmp/chrome/Cookies");
+    mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValue({
+      auth: chrome,
+      diagnostics: browserDiagnostics(chrome),
+    });
+    mocks.queryQwenCloudTokenPlan.mockResolvedValue(loginRequired);
+
+    const result = await qwenCloudTokenPlanProvider.fetch(context());
+    expect(result.attempted).toBe(true);
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(1);
+    expect(mocks.markQwenCloudSessionRejected).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops when resolution cycles back to a store already validated", async () => {
+    const chrome = browserAuth("google-chrome/Default", "/tmp/store-a");
+    const firefox = browserAuth("firefox/b", "/tmp/store-b");
+    mocks.resolveQwenCloudAuthWithDiagnostics
+      .mockResolvedValueOnce({ auth: chrome, diagnostics: browserDiagnostics(chrome) })
+      .mockResolvedValueOnce({ auth: firefox, diagnostics: browserDiagnostics(firefox) })
+      .mockResolvedValueOnce({ auth: chrome, diagnostics: browserDiagnostics(chrome) });
+    mocks.queryQwenCloudTokenPlan.mockResolvedValue(loginRequired);
+
+    const result = await qwenCloudTokenPlanProvider.fetch(context());
+    expect(result.attempted).toBe(true);
+    // A guard that only remembered the previous store would re-validate store A.
+    expect(mocks.queryQwenCloudTokenPlan).toHaveBeenCalledTimes(2);
+    expect(mocks.markQwenCloudSessionValidated).not.toHaveBeenCalled();
+  });
+
+  it("shrinks the per-profile budget as the sweep budget is spent", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      for (const index of [0, 1, 2]) {
+        const auth = browserAuth(`firefox/profile-${index}`, `/tmp/store-${index}`);
+        mocks.resolveQwenCloudAuthWithDiagnostics.mockResolvedValueOnce({
+          auth,
+          diagnostics: browserDiagnostics(auth),
+        });
+      }
+      const budgets: number[] = [];
+      mocks.queryQwenCloudTokenPlan.mockImplementation(
+        async (params: { totalBudgetMs?: number }) => {
+          budgets.push(params.totalBudgetMs ?? 0);
+          // Each console round trip eats most of the sweep budget.
+          vi.advanceTimersByTime(45_000);
+          return loginRequired;
+        },
+      );
+
+      await qwenCloudTokenPlanProvider.fetch(context());
+      // The first profile gets the full refresh budget, the next one only what is
+      // left of the sweep, and the chain ends when nothing is left.
+      expect(budgets).toEqual([20_000, 15_000]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops the sweep when the next resolution has no other session", async () => {
